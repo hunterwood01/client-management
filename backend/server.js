@@ -390,6 +390,20 @@ app.get('/branches/:id/company-history', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+app.delete('/branches/:id/company-history/:historyId', requireRole('admin', 'technician'), async (req, res, next) => {
+  const branchId = parseId(req.params.id);
+  const historyId = parseId(req.params.historyId);
+  if (!branchId || !historyId) return fail(res, 400, 'ID non valido.');
+  try {
+    const result = await pool.query(
+      'DELETE FROM branch_company_history WHERE id = $1 AND branch_id = $2 RETURNING id',
+      [historyId, branchId]
+    );
+    if (!result.rowCount) return fail(res, 404, 'Voce dello storico non trovata.');
+    res.status(204).end();
+  } catch (error) { next(error); }
+});
+
 app.get('/device-models', async (_req, res, next) => {
   try {
     const result = await pool.query('SELECT * FROM device_models ORDER BY manufacturer, model_name');
