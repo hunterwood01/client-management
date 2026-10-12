@@ -137,7 +137,7 @@ async function authenticate(req, res, next) {
   }
   try {
     const result = await pool.query(
-      'SELECT u.id, u.username, u.display_name, u.role FROM user_sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = $1 AND s.expires_at > NOW() AND u.is_active = TRUE',
+      'SELECT u.id, u.username, u.display_name, u.role, u.theme FROM user_sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = $1 AND s.expires_at > NOW() AND u.is_active = TRUE',
       [tokenHash(token)]
     );
     if (!result.rowCount) return fail(res, 401, 'Sessione scaduta. Accedi di nuovo.');
@@ -200,7 +200,7 @@ app.post('/auth/login', async (req, res, next) => {
   const password = req.body?.password;
   if (!username || typeof password !== 'string' || password.length > 1024) return fail(res, 400, 'Username e password sono obbligatori.');
   try {
-    const result = await pool.query('SELECT id, username, display_name, password_hash, role FROM users WHERE username = $1 AND is_active = TRUE', [username]);
+    const result = await pool.query('SELECT id, username, display_name, password_hash, role, theme FROM users WHERE username = $1 AND is_active = TRUE', [username]);
     const user = result.rows[0];
     if (!user || !(await verifyPassword(password, user.password_hash))) {
       const current = loginAttempts.get(ip);
@@ -213,7 +213,7 @@ app.post('/auth/login', async (req, res, next) => {
     const expiresAt = new Date(Date.now() + SESSION_HOURS * 60 * 60 * 1000);
     await pool.query('INSERT INTO user_sessions(token_hash, user_id, expires_at) VALUES ($1, $2, $3)', [tokenHash(token), user.id, expiresAt]);
     res.setHeader('Set-Cookie', sessionCookie(token, SESSION_HOURS * 60 * 60));
-    res.json({ user: { id: user.id, username: user.username, display_name: user.display_name, role: user.role } });
+    res.json({ user: { id: user.id, username: user.username, display_name: user.display_name, role: user.role, theme: user.theme } });
   } catch (error) {
     next(error);
   }
@@ -233,6 +233,16 @@ app.post('/auth/logout', async (req, res, next) => {
 app.use(authenticate);
 
 app.get('/auth/me', (req, res) => res.json({ user: req.user }));
+
+app.put('/auth/preferences', async (req, res, next) => {
+  const theme = req.body?.theme;
+  if (!['light', 'dark'].includes(theme)) return fail(res, 400, 'Tema non valido.');
+  try {
+    const result = await pool.query('UPDATE users SET theme = $1, updated_at = NOW() WHERE id = $2 RETURNING id, username, display_name, role, theme', [theme, req.user.id]);
+    req.user = result.rows[0];
+    res.json({ user: req.user });
+  } catch (error) { next(error); }
+});
 
 app.get('/dashboard', async (req, res, next) => {
   const filter = queryBranch(req);
@@ -384,6 +394,35 @@ app.post('/device-models', requireRole('admin'), async (req, res, next) => {
   } catch (error) { if (error.code === '23505') return fail(res, 409, 'Modello già presente.'); next(error); }
 });
 
+app.get('/purchase-profiles', async (_req, res, next) => {
+  try {
+    const result = await pool.query(
+      'SELECT p.*, m.manufacturer, m.model_name FROM purchase_profiles p JOIN device_models m ON m.id = p.device_model_id ORDER BY p.purchased_on DESC NULLS LAST, p.created_at DESC'
+    );
+    res.json({ data: result.rows });
+  } catch (error) { next(error); }
+});
+
+app.post('/purchase-profiles', requireRole('admin'), async (req, res, next) => {
+  const modelId = parseId(req.body?.device_model_id);
+  const supplier = cleanString(req.body?.supplier, 200);
+  const reference = cleanString(req.body?.reference, 200);
+  const purchasedOn = req.body?.purchased_on || null;
+  const unitCost = req.body?.unit_cost === '' || req.body?.unit_cost === undefined ? null : Number(req.body.unit_cost);
+  const monthlyFee = req.body?.monthly_fee === '' || req.body?.monthly_fee === undefined ? null : Number(req.body.monthly_fee);
+  const usefulLife = req.body?.useful_life_months === '' || req.body?.useful_life_months === undefined ? null : Number(req.body.useful_life_months);
+  const notes = cleanString(req.body?.notes, 10000);
+  if (!modelId || [supplier, reference, notes].includes(undefined)) return fail(res, 400, 'Modello o campi non validi.');
+  if ((unitCost !== null && (!Number.isFinite(unitCost) || unitCost < 0)) || (monthlyFee !== null && (!Number.isFinite(monthlyFee) || monthlyFee < 0)) || (usefulLife !== null && (!Number.isInteger(usefulLife) || usefulLife < 1))) return fail(res, 400, 'Valori economici o vita utile non validi.');
+  try {
+    const result = await pool.query(
+      'INSERT INTO purchase_profiles(device_model_id, supplier, reference, purchased_on, unit_cost, monthly_fee, useful_life_months, notes) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *',
+      [modelId, supplier, reference, purchasedOn, unitCost, monthlyFee, usefulLife, notes]
+    );
+    res.status(201).json({ data: result.rows[0] });
+  } catch (error) { if (error.code === '23503') return fail(res, 400, 'Modello inesistente.'); next(error); }
+});
+
 app.get('/devices', async (req, res, next) => {
   const filter = queryBranch(req);
   if (filter.error) return fail(res, 400, filter.error);
@@ -400,6 +439,7 @@ app.post('/devices', requireRole('admin', 'technician', 'warehouse'), async (req
   const modelId = parseId(req.body?.model_id);
   const branchId = req.body?.branch_id ? parseId(req.body.branch_id) : null;
   const stockLocationId = req.body?.stock_location_id ? parseId(req.body.stock_location_id) : null;
+  const purchaseProfileId = req.body?.purchase_profile_id ? parseId(req.body.purchase_profile_id) : null;
   const assetTag = cleanString(req.body?.asset_tag, 100);
   const serial = cleanString(req.body?.serial_number, 200);
   const status = req.body?.status || (branchId ? 'operational' : 'in_stock');
@@ -415,8 +455,8 @@ app.post('/devices', requireRole('admin', 'technician', 'warehouse'), async (req
   if ((cost !== null && (!Number.isFinite(Number(cost)) || Number(cost) < 0)) || (fee !== null && (!Number.isFinite(Number(fee)) || Number(fee) < 0))) return fail(res, 400, 'Importi non validi.');
   try {
     const result = await pool.query(
-      'INSERT INTO devices(model_id, branch_id, stock_location_id, asset_tag, serial_number, status, ownership_type, purchase_cost, monthly_fee, purchased_on, installed_on, notes) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *',
-      [modelId, branchId, stockLocationId, assetTag, serial, status, ownership, cost, fee, purchased, installed, notes]
+      'INSERT INTO devices(model_id, branch_id, stock_location_id, purchase_profile_id, asset_tag, serial_number, status, ownership_type, purchase_cost, monthly_fee, purchased_on, installed_on, notes) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *',
+      [modelId, branchId, stockLocationId, purchaseProfileId, assetTag, serial, status, ownership, cost, fee, purchased, installed, notes]
     );
     res.status(201).json({ data: result.rows[0] });
   } catch (error) { if (error.code === '23505') return fail(res, 409, 'Asset tag già presente.'); if (error.code === '23503') return fail(res, 400, 'Modello, filiale o magazzino non valido.'); next(error); }
