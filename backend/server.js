@@ -488,7 +488,7 @@ app.post('/devices', requireRole('admin', 'technician', 'warehouse'), async (req
   if ((cost !== null && (!Number.isFinite(Number(cost)) || Number(cost) < 0)) || (fee !== null && (!Number.isFinite(Number(fee)) || Number(fee) < 0))) return fail(res, 400, 'Importi non validi.');
   try {
     const result = await pool.query(
-      'INSERT INTO devices(model_id, branch_id, stock_location_id, purchase_profile_id, asset_tag, serial_number, status, ownership_type, purchase_cost, monthly_fee, purchased_on, installed_on, notes) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *',
+      'INSERT INTO devices(model_id, branch_id, stock_location_id, purchase_profile_id, asset_tag, serial_number, status, ownership_type, purchase_cost, monthly_fee, purchased_on, installed_on, notes) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,CASE WHEN $4::bigint IS NOT NULL THEN (SELECT unit_cost FROM purchase_profiles WHERE id=$4) ELSE $9 END,$10,$11,$12,$13) RETURNING *',
       [modelId, branchId, stockLocationId, purchaseProfileId, assetTag, serial, status, ownership, cost, fee, purchased, installed, notes]
     );
     res.status(201).json({ data: result.rows[0] });
