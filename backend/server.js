@@ -461,7 +461,7 @@ app.get('/devices', async (req, res, next) => {
   if (filter.error) return fail(res, 400, filter.error);
   try {
     const result = await pool.query(
-      'SELECT d.*, m.manufacturer, m.model_name, m.category, b.nomenclature AS branch_nomenclature, c.legal_name AS company_name, sl.name AS stock_location FROM devices d JOIN device_models m ON m.id = d.model_id LEFT JOIN branches b ON b.id = d.branch_id LEFT JOIN companies c ON c.id = b.company_id LEFT JOIN stock_locations sl ON sl.id = d.stock_location_id WHERE ($1::bigint IS NULL OR d.branch_id = $1) ORDER BY m.manufacturer, m.model_name, d.id DESC',
+      'SELECT d.*, m.manufacturer, m.model_name, m.category, m.sku, b.nomenclature AS branch_nomenclature, c.legal_name AS company_name, sl.name AS stock_location FROM devices d JOIN device_models m ON m.id = d.model_id LEFT JOIN branches b ON b.id = d.branch_id LEFT JOIN companies c ON c.id = b.company_id LEFT JOIN stock_locations sl ON sl.id = d.stock_location_id WHERE ($1::bigint IS NULL OR d.branch_id = $1) ORDER BY m.manufacturer, m.model_name, d.id DESC',
       [filter.id]
     );
     res.json({ data: result.rows });
