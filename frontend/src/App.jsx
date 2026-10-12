@@ -43,11 +43,11 @@ function initials(name) {
 }
 
 function normalizeText(value) {
-  return String(value ?? '').trim().normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').toLocaleLowerCase('it');
+  return String(value ?? '').trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLocaleLowerCase('it');
 }
 
 function parseNetworkCsv(text) {
-  const lines = String(text || '').replace(/^\\uFEFF/, '').split(/\\r?\\n/).filter((line) => line.trim());
+  const lines = String(text || '').replace(/^\uFEFF/, '').split(/\r?\n/).filter((line) => line.trim());
   if (lines.length < 2) throw new Error('Il CSV NETWORK non contiene righe da importare.');
   const countDelimiter = (line, delimiter) => {
     let quoted = false, count = 0;
@@ -59,7 +59,7 @@ function parseNetworkCsv(text) {
     return count;
   };
   const firstLine = lines[0];
-  const delimiter = [';', '\\t', ','].sort((a, b) => countDelimiter(firstLine, b) - countDelimiter(firstLine, a))[0];
+  const delimiter = [';', '\t', ','].sort((a, b) => countDelimiter(firstLine, b) - countDelimiter(firstLine, a))[0];
   const parseLine = (line) => {
     const cells = []; let value = '', quoted = false;
     for (let i = 0; i < line.length; i += 1) {
@@ -99,7 +99,7 @@ function splitNetworkBranch(combined, companyNames) {
   const value = String(combined || '').trim();
   const normalized = normalizeText(value);
   const matchingCompany = [...companyNames].sort((a, b) => b.length - a.length).find((name) => normalized.startsWith(normalizeText(name) + ' - '));
-  if (matchingCompany) return { companyName: matchingCompany, branchName: value.slice(matchingCompany.length).replace(/^\\s+-\\s+/, '').trim() };
+  if (matchingCompany) return { companyName: matchingCompany, branchName: value.slice(matchingCompany.length).replace(/^\s+-\s+/, '').trim() };
   const separator = value.lastIndexOf(' - ');
   if (separator > 0) return { companyName: value.slice(0, separator).trim(), branchName: value.slice(separator + 3).trim() };
   throw new Error('Impossibile separare ragione sociale e nome filiale nella voce: ' + value);
