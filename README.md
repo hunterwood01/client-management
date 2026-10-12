@@ -43,7 +43,7 @@ The backend applies ordered SQL files from backend/migrations at startup and rec
 
 - Do not commit .env, passwords, session secrets, SSH keys, database dumps or other credentials.
 - The API uses parameterized SQL, scrypt password hashes and opaque random session tokens stored as SHA-256 hashes in PostgreSQL.
-- Session cookies are HttpOnly and SameSite=Lax. Enable HTTPS and COOKIE_SECURE=true before exposing the portal outside a trusted local network.
+- Session cookies are HttpOnly and SameSite=Lax. Theme preference is stored per user and follows the user across devices. Enable HTTPS and COOKIE_SECURE=true before exposing the portal outside a trusted local network.
 - The initial administrator is provisioned from environment variables; no hard-coded credentials are included.
 
 ## API overview
@@ -54,6 +54,7 @@ The backend applies ordered SQL files from backend/migrations at startup and rec
 - GET/POST/PUT/DELETE /companies
 - GET/POST/PUT /branches and GET /branches/:id
 - GET/POST /device-models
+- GET/POST /purchase-profiles for manually maintained purchase and rental history
 - GET/POST/PUT /devices
 - GET/POST /stock/locations and GET/POST /stock/movements
 - GET/POST /branches/:id/checklists and PATCH /checklist-items/:id
