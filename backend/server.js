@@ -456,6 +456,51 @@ app.post('/purchase-profiles', requireRole('admin'), async (req,res,next)=>{
   await client.query('COMMIT');res.status(201).json({data:result.rows[0]});
  }catch(error){await client.query('ROLLBACK');if(error.code==='23503')return fail(res,400,'Modello o magazzino inesistente.');next(error);}finally{client.release();}
 });
+app.put('/purchase-profiles/:id', requireRole('admin'), async (req, res, next) => {
+  const id = parseId(req.params.id);
+  const supplier = cleanString(req.body?.supplier, 200);
+  const reference = cleanString(req.body?.reference, 200);
+  const purchasedOn = req.body?.purchased_on || null;
+  const unitCost = req.body?.unit_cost === '' || req.body?.unit_cost === undefined ? null : Number(req.body.unit_cost);
+  const quantity = Number(req.body?.quantity);
+  const notes = cleanString(req.body?.notes, 10000);
+  if (!id || [supplier, reference, notes].includes(undefined) || !Number.isInteger(quantity) || quantity < 1 || quantity > 100000) return fail(res, 400, 'Ordine, quantità o campi non validi.');
+  if (unitCost !== null && (!Number.isFinite(unitCost) || unitCost < 0)) return fail(res, 400, 'Il costo unitario deve essere un importo valido e non negativo.');
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const found = await client.query('SELECT * FROM purchase_profiles WHERE id = $1 FOR UPDATE', [id]);
+    if (!found.rowCount) { await client.query('ROLLBACK'); return fail(res, 404, 'Ordine non trovato.'); }
+    const order = found.rows[0];
+    const consumed = await client.query('SELECT COUNT(*)::int AS count FROM devices WHERE purchase_profile_id = $1 AND stock_consumed = TRUE', [id]);
+    const consumedCount = consumed.rows[0].count;
+    if (quantity < consumedCount) {
+      await client.query('ROLLBACK');
+      return fail(res, 409, 'La quantità non può essere inferiore ai device già prelevati da questo ordine (' + consumedCount + ').');
+    }
+    const delta = quantity - Number(order.quantity || 1);
+    if (delta !== 0 && order.stock_location_id) {
+      if (delta > 0) {
+        await client.query('INSERT INTO product_stock(device_model_id, stock_location_id, quantity) VALUES ($1,$2,$3) ON CONFLICT(device_model_id, stock_location_id) DO UPDATE SET quantity = product_stock.quantity + EXCLUDED.quantity, updated_at = NOW()', [order.device_model_id, order.stock_location_id, delta]);
+      } else {
+        const stock = await client.query('UPDATE product_stock SET quantity = quantity + $1, updated_at = NOW() WHERE device_model_id = $2 AND stock_location_id = $3 AND quantity + $1 >= 0 RETURNING quantity', [delta, order.device_model_id, order.stock_location_id]);
+        if (!stock.rowCount) {
+          await client.query('ROLLBACK');
+          return fail(res, 409, 'Impossibile ridurre la quantità: la giacenza disponibile non è sufficiente.');
+        }
+      }
+      await client.query("INSERT INTO product_stock_movements(device_model_id, stock_location_id, quantity_delta, movement_type, purchase_profile_id, notes, moved_by) VALUES ($1,$2,$3,'adjustment',$4,$5,$6)", [order.device_model_id, order.stock_location_id, delta, id, 'Modifica quantità ordine ' + (reference || order.reference || id), req.user.id]);
+    }
+    const result = await client.query('UPDATE purchase_profiles SET supplier = $1, reference = $2, purchased_on = $3, unit_cost = $4, quantity = $5, notes = $6 WHERE id = $7 RETURNING *', [supplier, reference, purchasedOn, unitCost, quantity, notes, id]);
+    await client.query('COMMIT');
+    res.json({ data: result.rows[0] });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    if (error.code === '23503') return fail(res, 400, 'Ordine collegato a dati non validi.');
+    next(error);
+  } finally { client.release(); }
+});
+
 app.get('/devices', async (req, res, next) => {
   const filter = queryBranch(req);
   if (filter.error) return fail(res, 400, filter.error);
