@@ -543,14 +543,14 @@ app.post('/devices', requireRole('admin', 'technician', 'warehouse'), async (req
 app.put('/devices/:id', requireRole('admin', 'technician', 'warehouse'), async (req, res, next) => {
   const id = parseId(req.params.id);
   if (!id) return fail(res, 400, 'ID non valido.');
-  const allowed = ['model_id', 'branch_id', 'stock_location_id', 'asset_tag', 'serial_number', 'status', 'ownership_type', 'purchase_cost', 'monthly_fee', 'purchased_on', 'installed_on', 'notes'];
+  const allowed = ['model_id', 'branch_id', 'stock_location_id', 'purchase_profile_id', 'asset_tag', 'serial_number', 'status', 'ownership_type', 'purchase_cost', 'monthly_fee', 'purchased_on', 'installed_on', 'notes'];
   const limits = { asset_tag: 100, serial_number: 200, status: 30, ownership_type: 20, notes: 10000 };
   const values = [];
   const assignments = [];
   for (const field of allowed) {
     if (!Object.hasOwn(req.body || {}, field)) continue;
     let value = req.body[field];
-    if (['model_id', 'branch_id', 'stock_location_id'].includes(field)) value = value === null || value === '' ? null : parseId(value);
+    if (['model_id', 'branch_id', 'stock_location_id', 'purchase_profile_id'].includes(field)) value = value === null || value === '' ? null : parseId(value);
     else if (['purchase_cost', 'monthly_fee'].includes(field)) value = value === null || value === '' ? null : Number(value);
     else if (['purchased_on', 'installed_on'].includes(field)) value = value || null;
     else value = cleanString(value, limits[field] || 200);
