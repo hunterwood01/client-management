@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS users (
   display_name VARCHAR(160) NOT NULL,
   password_hash TEXT NOT NULL,
   role VARCHAR(30) NOT NULL CHECK (role IN ('admin', 'technician', 'sales', 'warehouse', 'finance')),
+  theme VARCHAR(10) NOT NULL DEFAULT 'light' CHECK (theme IN ('light', 'dark')),
   is_active BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
