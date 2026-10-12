@@ -58,8 +58,7 @@ function parseNetworkCsv(text) {
     }
     return count;
   };
-  const firstLine = lines[0];
-  const delimiter = [';', '\t', ','].sort((a, b) => countDelimiter(firstLine, b) - countDelimiter(firstLine, a))[0];
+  const delimiter = [';', '\t', ','].sort((a, b) => countDelimiter(lines[0], b) - countDelimiter(lines[0], a))[0];
   const parseLine = (line) => {
     const cells = []; let value = '', quoted = false;
     for (let i = 0; i < line.length; i += 1) {
@@ -76,22 +75,28 @@ function parseNetworkCsv(text) {
   const headerKey = (value) => normalizeText(value).replace(/[^a-z0-9]+/g, ' ').trim();
   const headers = firstCells.map(headerKey);
   const find = (...names) => headers.findIndex((header) => names.includes(header));
-  const nameIndex = find('ragione sociale', 'nome filiale', 'filiale', 'branch', 'sede');
-  const hasHeader = nameIndex >= 0 && headers.some((header) => ['prefisso', 'phone prefix', 'network lan', 'lan', 'wlc'].includes(header));
+  const companyIndex = find('ragione sociale', 'company', 'azienda');
+  const branchIndex = find('nome filiale', 'filiale', 'branch', 'sede');
+  const hasHeader = companyIndex >= 0 && branchIndex >= 0;
   const rows = hasHeader ? lines.slice(1).map(parseLine) : lines.map(parseLine);
   const indexes = hasHeader ? {
-    name: nameIndex,
+    company: companyIndex, branch: branchIndex,
     prefix: find('prefisso', 'prefisso telefonico', 'phone prefix', 'prefix'),
     lan: find('network lan', 'lan', 'rete lan'),
     wlc: find('wlc', 'wireless lan controller'),
-    oldName: find('vecchio nome', 'old name', 'previous nomenclature')
-  } : { name: 0, prefix: 1, lan: 2, wlc: 5, oldName: 7 };
+    oldName: find('vecchio nome', 'old name', 'previous nomenclature'),
+    newName: find('nuovo nome', 'new name', 'nomenclatura')
+  } : { company: -1, branch: 0, prefix: 1, lan: 2, wlc: 5, oldName: 7, newName: -1 };
   return rows.map((cells, index) => {
-    const combined = String(cells[indexes.name] || '').trim();
-    if (!combined) return null;
-    if (normalizeText(combined).includes('network 4g vodafone')) return null;
     const value = (column) => column >= 0 ? String(cells[column] || '').trim() : '';
-    return { combined, prefix: value(indexes.prefix), lan: value(indexes.lan), wlc: value(indexes.wlc), oldName: value(indexes.oldName), rowNumber: index + (hasHeader ? 2 : 1) };
+    const combined = value(indexes.branch);
+    const companyName = value(indexes.company);
+    if (!combined || normalizeText(combined).includes('network 4g vodafone')) return null;
+    return {
+      combined, companyName, branchName: combined, prefix: value(indexes.prefix), lan: value(indexes.lan),
+      wlc: value(indexes.wlc), oldName: value(indexes.oldName), newName: value(indexes.newName),
+      rowNumber: index + (hasHeader ? 2 : 1)
+    };
   }).filter(Boolean);
 }
 
@@ -264,7 +269,9 @@ export default function App() {
       let added = 0, updated = 0, skipped = 0;
       const seen = new Set();
       for (const row of rows) {
-        const split = splitNetworkBranch(row.combined, companyCache.map((company) => company.legal_name));
+        const split = row.companyName
+          ? { companyName: row.companyName, branchName: row.branchName }
+          : splitNetworkBranch(row.combined, companyCache.map((company) => company.legal_name));
         if (!split.branchName) { skipped += 1; continue; }
         const key = normalizeText(split.companyName) + '|' + normalizeText(split.branchName);
         if (seen.has(key)) { skipped += 1; continue; }
@@ -283,7 +290,7 @@ export default function App() {
           company_id: Number(company.id),
           country: 'Italia',
           street: split.branchName,
-          nomenclature: split.branchName,
+          nomenclature: row.newName && row.newName !== '/' ? row.newName : (existing?.nomenclature || split.branchName),
           previous_nomenclature: row.oldName || existing?.previous_nomenclature || '',
           network: row.lan,
           phone_prefix: row.prefix,
