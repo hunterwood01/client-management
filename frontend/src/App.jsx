@@ -213,7 +213,7 @@ export default function App() {
   }
 
   if (authLoading) return <div className="boot-screen"><div className="login-mark">CM</div><span>Caricamento workspace…</span></div>;
-  if (!user) return <Login onLogin={(loggedUser) => { setUser(loggedUser); setError(''); }} />;
+  if (!user) return <Login onLogin={(loggedUser) => { setUser(loggedUser); setTheme(loggedUser.theme || 'light'); setError(''); }} />;
 
   return (
     <div className="app-shell">
