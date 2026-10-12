@@ -184,6 +184,15 @@ tbody tr:hover td { background: color-mix(in srgb, var(--surface-soft) 72%, tran
 .detail-field span, .detail-field strong { display: block; }
 .detail-field span { color: var(--muted); font-size: 10px; margin-bottom: 8px; }
 .detail-field strong { font-size: 12px; overflow-wrap: anywhere; }
+
+.history-list { display: flex; flex-direction: column; }
+.history-entry { display: flex; gap: 13px; padding: 16px 0; border-top: 1px solid var(--border); }
+.history-marker { flex: 0 0 auto; width: 10px; height: 10px; margin: 5px 0 0 4px; border-radius: 50%; background: var(--primary); box-shadow: 0 0 0 4px var(--primary-soft); }
+.history-entry-content { min-width: 0; }
+.history-entry-content strong { display: block; font-size: 12px; overflow-wrap: anywhere; }
+.history-entry-content strong span { color: var(--primary); padding: 0 5px; }
+.history-entry-content p { margin: 6px 0 0; color: var(--muted); font-size: 10px; line-height: 1.6; }
+
 .nested-table { border: 0; box-shadow: none; border-radius: 0; }
 .nested-table table { min-width: 640px; }
 .checklist-card { padding: 16px 0; border-top: 1px solid var(--border); }

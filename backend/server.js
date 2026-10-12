@@ -359,10 +359,34 @@ app.put('/branches/:id', requireRole('admin', 'technician'), async (req, res, ne
   }
   if (!updates.length) return fail(res, 400, 'Specificare almeno un campo.');
   values.push(id);
+  const client = await pool.connect();
   try {
-    const result = await pool.query('UPDATE branches SET ' + updates.join(', ') + ', updated_at = NOW() WHERE id = $' + values.length + ' RETURNING *', values);
-    if (!result.rowCount) return fail(res, 404, 'Filiale non trovata.');
-    res.json({ data: result.rows[0] });
+    await client.query('BEGIN');
+    const before = await client.query('SELECT b.company_id, c.legal_name AS company_name FROM branches b JOIN companies c ON c.id = b.company_id WHERE b.id = $1 FOR UPDATE OF b', [id]);
+    if (!before.rowCount) { await client.query('ROLLBACK'); return fail(res, 404, 'Filiale non trovata.'); }
+    const oldCompanyId = String(before.rows[0].company_id);
+    const oldCompanyName = before.rows[0].company_name;
+    const result = await client.query('UPDATE branches SET ' + updates.join(', ') + ', updated_at = NOW() WHERE id = $' + values.length + ' RETURNING *', values);
+    if (!result.rowCount) { await client.query('ROLLBACK'); return fail(res, 404, 'Filiale non trovata.'); }
+    const newCompanyId = String(result.rows[0].company_id);
+    if (oldCompanyId !== newCompanyId) {
+      const after = await client.query('SELECT legal_name FROM companies WHERE id = $1', [newCompanyId]);
+      if (!after.rowCount) { await client.query('ROLLBACK'); return fail(res, 400, 'Ragione sociale inesistente.'); }
+      await client.query('INSERT INTO branch_company_history(branch_id, from_company_id, from_company_name, to_company_id, to_company_name, changed_by) VALUES ($1,$2,$3,$4,$5,$6)', [id, oldCompanyId, oldCompanyName, newCompanyId, after.rows[0].legal_name, req.user.display_name || req.user.username]);
+    }
+    await client.query('COMMIT');
+    const enriched = await pool.query('SELECT b.*, c.legal_name AS company_name FROM branches b JOIN companies c ON c.id = b.company_id WHERE b.id = $1', [id]);
+    res.json({ data: enriched.rows[0] });
+  } catch (error) { await client.query('ROLLBACK').catch(() => {}); next(error); }
+  finally { client.release(); }
+});
+
+app.get('/branches/:id/company-history', async (req, res, next) => {
+  const id = parseId(req.params.id);
+  if (!id) return fail(res, 400, 'ID non valido.');
+  try {
+    const result = await pool.query('SELECT id, branch_id, from_company_name, to_company_name, changed_by, changed_at FROM branch_company_history WHERE branch_id = $1 ORDER BY changed_at DESC, id DESC', [id]);
+    res.json({ data: result.rows });
   } catch (error) { next(error); }
 });
 
