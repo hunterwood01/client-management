@@ -42,6 +42,69 @@ function initials(name) {
   return String(name || 'Utente').split(/\s+/).slice(0, 2).map((part) => part[0]).join('').toUpperCase();
 }
 
+function normalizeText(value) {
+  return String(value ?? '').trim().normalize('NFD').replace(/[\\u0300-\\u036f]/g, '').toLocaleLowerCase('it');
+}
+
+function parseNetworkCsv(text) {
+  const lines = String(text || '').replace(/^\\uFEFF/, '').split(/\\r?\\n/).filter((line) => line.trim());
+  if (lines.length < 2) throw new Error('Il CSV NETWORK non contiene righe da importare.');
+  const countDelimiter = (line, delimiter) => {
+    let quoted = false, count = 0;
+    for (let i = 0; i < line.length; i += 1) {
+      if (line[i] === '"' && line[i + 1] === '"' && quoted) i += 1;
+      else if (line[i] === '"') quoted = !quoted;
+      else if (line[i] === delimiter && !quoted) count += 1;
+    }
+    return count;
+  };
+  const firstLine = lines[0];
+  const delimiter = [';', '\\t', ','].sort((a, b) => countDelimiter(firstLine, b) - countDelimiter(firstLine, a))[0];
+  const parseLine = (line) => {
+    const cells = []; let value = '', quoted = false;
+    for (let i = 0; i < line.length; i += 1) {
+      const ch = line[i];
+      if (ch === '"' && quoted && line[i + 1] === '"') { value += '"'; i += 1; }
+      else if (ch === '"') quoted = !quoted;
+      else if (ch === delimiter && !quoted) { cells.push(value.trim()); value = ''; }
+      else value += ch;
+    }
+    cells.push(value.trim());
+    return cells;
+  };
+  const firstCells = parseLine(lines[0]);
+  const headerKey = (value) => normalizeText(value).replace(/[^a-z0-9]+/g, ' ').trim();
+  const headers = firstCells.map(headerKey);
+  const find = (...names) => headers.findIndex((header) => names.includes(header));
+  const nameIndex = find('ragione sociale', 'nome filiale', 'filiale', 'branch', 'sede');
+  const hasHeader = nameIndex >= 0 && headers.some((header) => ['prefisso', 'phone prefix', 'network lan', 'lan', 'wlc'].includes(header));
+  const rows = hasHeader ? lines.slice(1).map(parseLine) : lines.map(parseLine);
+  const indexes = hasHeader ? {
+    name: nameIndex,
+    prefix: find('prefisso', 'prefisso telefonico', 'phone prefix', 'prefix'),
+    lan: find('network lan', 'lan', 'rete lan'),
+    wlc: find('wlc', 'wireless lan controller'),
+    oldName: find('vecchio nome', 'old name', 'previous nomenclature')
+  } : { name: 0, prefix: 1, lan: 2, wlc: 5, oldName: 7 };
+  return rows.map((cells, index) => {
+    const combined = String(cells[indexes.name] || '').trim();
+    if (!combined) return null;
+    if (normalizeText(combined).includes('network 4g vodafone')) return null;
+    const value = (column) => column >= 0 ? String(cells[column] || '').trim() : '';
+    return { combined, prefix: value(indexes.prefix), lan: value(indexes.lan), wlc: value(indexes.wlc), oldName: value(indexes.oldName), rowNumber: index + (hasHeader ? 2 : 1) };
+  }).filter(Boolean);
+}
+
+function splitNetworkBranch(combined, companyNames) {
+  const value = String(combined || '').trim();
+  const normalized = normalizeText(value);
+  const matchingCompany = [...companyNames].sort((a, b) => b.length - a.length).find((name) => normalized.startsWith(normalizeText(name) + ' - '));
+  if (matchingCompany) return { companyName: matchingCompany, branchName: value.slice(matchingCompany.length).replace(/^\\s+-\\s+/, '').trim() };
+  const separator = value.lastIndexOf(' - ');
+  if (separator > 0) return { companyName: value.slice(0, separator).trim(), branchName: value.slice(separator + 3).trim() };
+  throw new Error('Impossibile separare ragione sociale e nome filiale nella voce: ' + value);
+}
+
 function ErrorNotice({ message, onClose }) {
   if (!message) return null;
   return <div className="notice notice-error" role="alert"><span>{message}</span><button className="icon-button" onClick={onClose} aria-label="Chiudi">×</button></div>;
@@ -189,6 +252,60 @@ export default function App() {
 
   async function refresh() { await loadData(); }
 
+  async function importNetworkCsv(file) {
+    setBusy(true); setError(''); setSuccess('');
+    try {
+      const text = await file.text();
+      const rows = parseNetworkCsv(text);
+      if (!rows.length) throw new Error('Nessuna filiale valida trovata nel CSV.');
+      const companyCache = [...companies];
+      const currentBranches = [...branches];
+      const findCompany = (name) => companyCache.find((company) => normalizeText(company.legal_name) === normalizeText(name));
+      let added = 0, updated = 0, skipped = 0;
+      const seen = new Set();
+      for (const row of rows) {
+        const split = splitNetworkBranch(row.combined, companyCache.map((company) => company.legal_name));
+        if (!split.branchName) { skipped += 1; continue; }
+        const key = normalizeText(split.companyName) + '|' + normalizeText(split.branchName);
+        if (seen.has(key)) { skipped += 1; continue; }
+        seen.add(key);
+        let company = findCompany(split.companyName);
+        if (!company) {
+          const result = await api('/companies', { method: 'POST', body: JSON.stringify({ legal_name: split.companyName, tax_code: '' }) });
+          company = result.data;
+          companyCache.push(company);
+        }
+        const existing = currentBranches.find((branch) =>
+          Number(branch.company_id) === Number(company.id) &&
+          [branch.nomenclature, branch.street, branch.previous_nomenclature].some((value) => normalizeText(value) === normalizeText(split.branchName) || (row.oldName && normalizeText(value) === normalizeText(row.oldName)))
+        );
+        const body = {
+          company_id: Number(company.id),
+          country: 'Italia',
+          street: split.branchName,
+          nomenclature: split.branchName,
+          previous_nomenclature: row.oldName || existing?.previous_nomenclature || '',
+          network: row.lan,
+          phone_prefix: row.prefix,
+          wlc: row.wlc
+        };
+        if (existing) {
+          await api('/branches/' + existing.id, { method: 'PUT', body: JSON.stringify(body) });
+          Object.assign(existing, body);
+          updated += 1;
+        } else {
+          const result = await api('/branches', { method: 'POST', body: JSON.stringify(body) });
+          currentBranches.push(result.data);
+          added += 1;
+        }
+      }
+      await refresh();
+      setSuccess('Import NETWORK completato: ' + added + ' nuove filiali, ' + updated + ' aggiornate, ' + skipped + ' ignorate. Nessuna filiale è stata eliminata.');
+    } catch (err) {
+      setError('Import NETWORK interrotto: ' + err.message + ' Se sono già state elaborate alcune righe, verifica l’elenco prima di ripetere l’importazione.');
+    } finally { setBusy(false); }
+  }
+
   async function logout() {
     try { await api('/auth/logout', { method: 'POST' }); } catch { /* Session may already be expired. */ }
     setUser(null); setProfileOpen(false); setPage('dashboard');
@@ -238,7 +355,7 @@ export default function App() {
 
           {page === 'dashboard' && <section className="page-content"><div className="page-intro"><div><p className="eyebrow">PANORAMICA</p><h2>Buongiorno, {user.display_name.split(' ')[0]}.</h2><p className="muted">Ecco la situazione attuale del tuo workspace.</p></div><button className="secondary-button" onClick={refresh}>↻ Aggiorna</button></div><div className="stats-grid"><StatCard label="Filiali" value={dashboard?.branches ?? '—'} caption="Sedi registrate" icon="⌂" /><StatCard label="Device" value={dashboard?.devices ?? '—'} caption="Apparati censiti" icon="▣" tone="violet" /><StatCard label="Da verificare" value={dashboard?.faults ?? '—'} caption="Device in stato guasto" icon="!" tone="amber" /><StatCard label="Canoni mensili" value={money(dashboard?.monthlyFees)} caption="Valore mensile registrato" icon="€" tone="green" /></div><div className="dashboard-grid"><section className="panel"><div className="panel-heading"><div><h3>Attività operative</h3><p>Riepilogo del parco device</p></div><button className="text-button" onClick={() => setPage('devices')}>Vedi device →</button></div><div className="activity-list"><div className="activity-row"><span className="activity-icon blue">▣</span><div><strong>Dispositivi a magazzino</strong><small>Disponibili per assegnazione</small></div><b>{dashboard?.stock ?? '—'}</b></div><div className="activity-row"><span className="activity-icon amber">!</span><div><strong>Dispositivi guasti</strong><small>Richiedono una verifica</small></div><b>{dashboard?.faults ?? '—'}</b></div><div className="activity-row"><span className="activity-icon green">€</span><div><strong>Canoni mensili</strong><small>Somma dei canoni dei device</small></div><b>{money(dashboard?.monthlyFees)}</b></div></div></section><section className="panel quick-panel"><div className="panel-heading"><div><h3>Accesso rapido</h3><p>Le azioni più utilizzate</p></div></div><button className="quick-action" onClick={() => setModal('branch')}><span className="quick-icon">＋</span><span><strong>Nuova filiale</strong><small>Aggiungi una sede al workspace</small></span><span className="quick-arrow">→</span></button><button className="quick-action" onClick={() => setModal('device')}><span className="quick-icon purple">▣</span><span><strong>Registra device</strong><small>Inserisci un nuovo apparato</small></span><span className="quick-arrow">→</span></button><button className="quick-action" onClick={() => { setPage('admin'); setAdminTab('models'); }}><span className="quick-icon green">⌘</span><span><strong>Catalogo modelli</strong><small>Gestisci i valori precompilati</small></span><span className="quick-arrow">→</span></button></section></div></section>}
 
-          {page === 'branches' && <section className="page-content"><div className="page-intro"><div><p className="eyebrow">ANAGRAFICA</p><h2>Le tue filiali</h2><p className="muted">Dati essenziali in elenco, informazioni complete nel dettaglio.</p></div><button className="primary-button" onClick={() => { setBranchForm(emptyBranch); setModal('branch'); }}>＋ Nuova filiale</button></div><div className="toolbar"><label className="search-box"><span>⌕</span><input placeholder="Cerca ragione sociale, via, network…" value={search} onChange={(event) => setSearch(event.target.value)} /></label><span className="result-count">{filteredBranches.length} filiali</span></div><div className="table-panel"><table><thead><tr><th>Ragione sociale</th><th>Paese</th><th>Via</th><th>Network</th><th /></tr></thead><tbody>{filteredBranches.map((branch) => <tr key={branch.id} onClick={() => openBranch(branch)} className="clickable-row"><td><strong>{branch.company_name}</strong><small>{branch.nomenclature || 'Nomenclatura non impostata'}</small></td><td>{branch.country}</td><td>{branch.street}</td><td><span className="soft-tag">{branch.network || '—'}</span></td><td><button className="row-action" onClick={(event) => { event.stopPropagation(); openBranch(branch); }}>Apri →</button></td></tr>)}</tbody></table>{!filteredBranches.length && <EmptyState icon="⌂" title="Nessuna filiale presente" description="Crea una filiale per iniziare a organizzare il workspace." />}</div></section>}
+          {page === 'branches' && <section className="page-content"><div className="page-intro"><div><p className="eyebrow">ANAGRAFICA</p><h2>Le tue filiali</h2><p className="muted">Anagrafica dal foglio NETWORK: ragione sociale, filiale, prefisso, LAN e WLC.</p></div><div className="page-actions"><label className="secondary-button file-import-button">Importa CSV NETWORK<input type="file" accept=".csv,text/csv" hidden disabled={busy} onChange={(event) => { const file = event.target.files?.[0]; if (file) importNetworkCsv(file); event.target.value = ''; }} /></label><button className="primary-button" onClick={() => { setBranchForm(emptyBranch); setModal('branch'); }}>＋ Nuova filiale</button></div></div><div className="toolbar"><label className="search-box"><span>⌕</span><input placeholder="Cerca ragione sociale, via, network…" value={search} onChange={(event) => setSearch(event.target.value)} /></label><span className="result-count">{filteredBranches.length} filiali</span></div><div className="table-panel"><table><thead><tr><th>Ragione sociale</th><th>Filiale</th><th>Prefisso</th><th>LAN</th><th>WLC</th><th /></tr></thead><tbody>{filteredBranches.map((branch) => <tr key={branch.id} onClick={() => openBranch(branch)} className="clickable-row"><td><strong>{branch.company_name}</strong><small>{branch.previous_nomenclature || 'Anagrafica NETWORK'}</small></td><td>{branch.nomenclature || branch.street || '—'}</td><td>{branch.phone_prefix || '—'}</td><td><span className="soft-tag">{branch.network || '—'}</span></td><td>{branch.wlc || '—'}</td><td><button className="row-action" onClick={(event) => { event.stopPropagation(); openBranch(branch); }}>Apri →</button></td></tr>)}</tbody></table>{!filteredBranches.length && <EmptyState icon="⌂" title="Nessuna filiale presente" description="Crea una filiale per iniziare a organizzare il workspace." />}</div></section>}
 
           {page === 'branchDetail' && selectedBranch && <section className="page-content"><button className="back-link" onClick={() => setPage('branches')}>← Torna alle filiali</button><div className="detail-heading"><div className="branch-emblem">⌂</div><div><p className="eyebrow">SCHEDA FILIALE</p><h2>{selectedBranch.nomenclature || selectedBranch.street}</h2><p className="muted">{selectedBranch.company_name} · {selectedBranch.country} · {selectedBranch.street}</p></div><button className="secondary-button" onClick={() => { setBranchForm({ company_id: String(selectedBranch.company_id), country: selectedBranch.country || '', street: selectedBranch.street || '', nomenclature: selectedBranch.nomenclature || '', previous_nomenclature: selectedBranch.previous_nomenclature || '', network: selectedBranch.network || '', phone_prefix: selectedBranch.phone_prefix || '', wlc: selectedBranch.wlc || '' }); setModal('editBranch'); }}>Modifica anagrafica</button></div><div className="tabs"><button className={branchTab === 'details' ? 'selected' : ''} onClick={() => setBranchTab('details')}>Anagrafica</button><button className={branchTab === 'devices' ? 'selected' : ''} onClick={() => setBranchTab('devices')}>Devices <span>{devices.filter((device) => String(device.branch_id) === String(selectedBranch.id)).length}</span></button><button className={branchTab === 'checklist' ? 'selected' : ''} onClick={() => setBranchTab('checklist')}>Check-list</button></div>{branchTab === 'details' && <div className="detail-grid">{[['Ragione sociale', selectedBranch.company_name], ['Paese', selectedBranch.country], ['Via', selectedBranch.street], ['Nomenclatura', selectedBranch.nomenclature], ['Vecchia nomenclatura', selectedBranch.previous_nomenclature], ['Network', selectedBranch.network], ['Phone Prefix', selectedBranch.phone_prefix], ['WLC', selectedBranch.wlc]].map(([label, value]) => <article className="detail-field" key={label}><span>{label}</span><strong>{value || '—'}</strong></article>)}</div>}{branchTab === 'devices' && <div className="panel"><div className="panel-heading"><div><h3>Device installati</h3><p>Apparati associati a questa filiale</p></div><button className="primary-button" onClick={() => { setDeviceForm((form) => ({ ...form, branch_id: String(selectedBranch.id), status: 'operational' })); setModal('device'); }}>＋ Aggiungi device</button></div><DeviceTable devices={devices.filter((device) => String(device.branch_id) === String(selectedBranch.id))} />{!devices.some((device) => String(device.branch_id) === String(selectedBranch.id)) && <EmptyState icon="▣" title="Nessun device installato" description="Aggiungi il primo dispositivo a questa filiale." />}</div>}{branchTab === 'checklist' && <div className="panel"><div className="panel-heading"><div><h3>Check-list operative</h3><p>Controlli e attività della filiale</p></div><button className="primary-button" onClick={() => setModal('checklist')}>＋ Nuova checklist</button></div>{checklists.map((checklist) => <div className="checklist-card" key={checklist.id}><div className="checklist-card-heading"><strong>{checklist.title}</strong><span className={'soft-tag ' + (checklist.status === 'completed' ? 'green-tag' : '')}>{checklist.status === 'completed' ? 'Completata' : 'Aperta'}</span></div>{checklist.items.map((item) => <label className="checklist-item" key={item.id}><input type="checkbox" checked={item.is_checked} onChange={async (event) => { try { await api('/checklist-items/' + item.id, { method: 'PATCH', body: JSON.stringify({ is_checked: event.target.checked }) }); const result = await api('/branches/' + selectedBranch.id + '/checklists'); setChecklists(result.data); } catch (err) { setError(err.message); } }} /><span>{item.label}</span></label>)}</div>)}{!checklists.length && <EmptyState icon="☷" title="Nessuna checklist" description="Crea una checklist per registrare le verifiche operative." />}</div>}</section>}
 
