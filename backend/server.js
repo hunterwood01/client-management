@@ -501,6 +501,58 @@ app.put('/purchase-profiles/:id', requireRole('admin'), async (req, res, next) =
   } finally { client.release(); }
 });
 
+app.delete('/purchase-profiles/:id', requireRole('admin'), async (req, res, next) => {
+  const id = parseId(req.params.id);
+  if (!id) return fail(res, 400, 'ID ordine non valido.');
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const found = await client.query('SELECT * FROM purchase_profiles WHERE id = $1 FOR UPDATE', [id]);
+    if (!found.rowCount) {
+      await client.query('ROLLBACK');
+      return fail(res, 404, 'Ordine non trovato.');
+    }
+    const order = found.rows[0];
+    const linkedDevices = await client.query('SELECT COUNT(*)::int AS count FROM devices WHERE purchase_profile_id = $1', [id]);
+    if (linkedDevices.rows[0].count > 0) {
+      await client.query('ROLLBACK');
+      return fail(res, 409, 'Impossibile eliminare l’ordine: ci sono device collegati. Rimuovi o ricollega prima i device.');
+    }
+    if (order.stock_location_id && Number(order.quantity || 0) > 0) {
+      const stock = await client.query(
+        'UPDATE product_stock SET quantity = quantity - $1, updated_at = NOW() WHERE device_model_id = $2 AND stock_location_id = $3 AND quantity >= $1 RETURNING quantity',
+        [Number(order.quantity), order.device_model_id, order.stock_location_id]
+      );
+      if (!stock.rowCount) {
+        await client.query('ROLLBACK');
+        return fail(res, 409, 'Impossibile eliminare l’ordine: la giacenza disponibile non è sufficiente per stornare il carico.');
+      }
+      await client.query(
+        "UPDATE product_stock_movements SET purchase_profile_id = NULL, notes = CONCAT(COALESCE(notes, ''), $1) WHERE purchase_profile_id = $2",
+        [' [ordine eliminato #' + id + (order.reference ? ' · ' + order.reference : '') + ']', id]
+      );
+      await client.query(
+        "INSERT INTO product_stock_movements(device_model_id, stock_location_id, quantity_delta, movement_type, notes, moved_by) VALUES ($1,$2,$3,'adjustment',$4,$5)",
+        [order.device_model_id, order.stock_location_id, -Number(order.quantity), 'Storno carico ordine eliminato #' + id + (order.reference ? ' · ' + order.reference : ''), req.user.id]
+      );
+    } else {
+      await client.query(
+        "UPDATE product_stock_movements SET purchase_profile_id = NULL, notes = CONCAT(COALESCE(notes, ''), $1) WHERE purchase_profile_id = $2",
+        [' [ordine eliminato #' + id + (order.reference ? ' · ' + order.reference : '') + ']', id]
+      );
+    }
+    await client.query('DELETE FROM purchase_profiles WHERE id = $1', [id]);
+    await client.query('COMMIT');
+    res.status(204).end();
+  } catch (error) {
+    await client.query('ROLLBACK');
+    if (error.code === '23503') return fail(res, 409, 'Impossibile eliminare l’ordine perché è ancora collegato ad altri dati.');
+    next(error);
+  } finally {
+    client.release();
+  }
+});
+
 app.get('/devices', async (req, res, next) => {
   const filter = queryBranch(req);
   if (filter.error) return fail(res, 400, filter.error);
@@ -582,6 +634,22 @@ app.post('/stock/locations', requireRole('admin', 'warehouse'), async (req, res,
     const result = await pool.query('INSERT INTO stock_locations(name, address) VALUES ($1,$2) RETURNING *', [name, address]);
     res.status(201).json({ data: result.rows[0] });
   } catch (error) { if (error.code === '23505') return fail(res, 409, 'Magazzino già presente.'); next(error); }
+});
+
+app.put('/stock/locations/:id', requireRole('admin', 'warehouse'), async (req, res, next) => {
+  const id = parseId(req.params.id);
+  const name = cleanString(req.body?.name, 160);
+  const address = cleanString(req.body?.address, 300);
+  if (!id) return fail(res, 400, 'ID magazzino non valido.');
+  if (!name || address === undefined) return fail(res, 400, 'Il nome del magazzino è obbligatorio.');
+  try {
+    const result = await pool.query('UPDATE stock_locations SET name = $1, address = $2 WHERE id = $3 RETURNING *', [name, address, id]);
+    if (!result.rowCount) return fail(res, 404, 'Magazzino non trovato.');
+    res.json({ data: result.rows[0] });
+  } catch (error) {
+    if (error.code === '23505') return fail(res, 409, 'Esiste già un magazzino con questo nome.');
+    next(error);
+  }
 });
 
 app.get('/product-stock',async(_req,res,next)=>{
