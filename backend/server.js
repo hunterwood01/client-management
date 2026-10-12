@@ -710,13 +710,20 @@ app.get('/finance/dashboard',async(req,res,next)=>{
   SELECT COALESCE(SUM(sale_price),0)::numeric AS sales_all_time,
    COALESCE(SUM(sale_price) FILTER(WHERE COALESCE(activated_on,installed_on,created_at::date)>=date_trunc('month',CURRENT_DATE)::date AND COALESCE(activated_on,installed_on,created_at::date)<(date_trunc('month',CURRENT_DATE)+INTERVAL '1 month')::date),0)::numeric AS sales_current_month
   FROM devices d WHERE d.ownership_type='sale' AND d.sale_price IS NOT NULL AND ($1::bigint IS NULL OR d.branch_id=$1)
+ ), costs AS (
+  SELECT
+   COALESCE((SELECT SUM(COALESCE(p.unit_cost,0)*COALESCE(p.quantity,1)) FROM purchase_profiles p),0)::numeric AS hardware_costs,
+   COALESCE((SELECT SUM(fe.amount) FROM finance_entries fe WHERE fe.entry_type IN ('service','other') AND ($1::bigint IS NULL OR fe.branch_id=$1)),0)::numeric AS other_costs
  )
  SELECT (SELECT COUNT(*)::int FROM devices d WHERE ($1::bigint IS NULL OR d.branch_id=$1)) AS devices,
  (SELECT COALESCE(SUM(d.purchase_cost),0)::numeric FROM devices d WHERE ($1::bigint IS NULL OR d.branch_id=$1)) AS purchase_cost,
  (SELECT COALESCE(SUM(d.monthly_fee),0)::numeric FROM devices d WHERE d.ownership_type='rental' AND d.status<>'decommissioned' AND ($1::bigint IS NULL OR d.branch_id=$1)) AS monthly_fees,
  (SELECT COUNT(*)::int FROM devices d WHERE d.ownership_type='rental' AND ($1::bigint IS NULL OR d.branch_id=$1)) AS rental_devices,
  (SELECT COUNT(*)::int FROM devices d WHERE d.ownership_type='sale' AND ($1::bigint IS NULL OR d.branch_id=$1)) AS owned_devices,
- totals.nol_current_month,totals.nol_all_time,totals.nol_balance,sales.sales_current_month,sales.sales_all_time FROM totals CROSS JOIN sales
+ totals.nol_current_month,totals.nol_all_time,totals.nol_balance,sales.sales_current_month,sales.sales_all_time,
+ costs.hardware_costs,costs.other_costs,(costs.hardware_costs+costs.other_costs)::numeric AS total_costs,
+ (totals.nol_all_time+sales.sales_all_time-costs.hardware_costs-costs.other_costs)::numeric AS overall_margin
+ FROM totals CROSS JOIN sales CROSS JOIN costs
  `,[filter.id]);res.json({data:result.rows[0]});
  }catch(error){next(error);}
 });
