@@ -412,26 +412,24 @@ app.get('/device-models', async (_req, res, next) => {
 });
 
 app.post('/device-models', requireRole('admin'), async (req, res, next) => {
-  const manufacturer = cleanString(req.body?.manufacturer, 120);
-  const modelName = cleanString(req.body?.model_name, 160);
-  const category = cleanString(req.body?.category, 100);
-  const ownership = req.body?.ownership_type || 'sale';
-  const cost = req.body?.default_purchase_cost ?? null;
-  const fee = req.body?.default_monthly_fee ?? null;
-  const life = req.body?.useful_life_months ?? null;
-  const notes = cleanString(req.body?.notes, 10000);
-  if (!manufacturer || !modelName || !category || [manufacturer, modelName, category, notes].includes(undefined)) return fail(res, 400, 'Produttore, modello e categoria sono obbligatori.');
-  if (!['sale', 'rental'].includes(ownership)) return fail(res, 400, 'Tipologia economica non valida.');
-  if ((cost !== null && (!Number.isFinite(Number(cost)) || Number(cost) < 0)) || (fee !== null && (!Number.isFinite(Number(fee)) || Number(fee) < 0))) return fail(res, 400, 'Importi non validi.');
-  try {
-    const result = await pool.query(
-      'INSERT INTO device_models(manufacturer, model_name, category, ownership_type, default_purchase_cost, default_monthly_fee, useful_life_months, notes) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *',
-      [manufacturer, modelName, category, ownership, cost, fee, life, notes]
-    );
-    res.status(201).json({ data: result.rows[0] });
-  } catch (error) { if (error.code === '23505') return fail(res, 409, 'Modello già presente.'); next(error); }
+ const manufacturer=cleanString(req.body?.manufacturer,120), modelName=cleanString(req.body?.model_name,160), category=cleanString(req.body?.category,100), sku=cleanString(req.body?.sku,100);
+ const ownership=req.body?.ownership_type||'sale', cost=req.body?.default_purchase_cost===''?null:(req.body?.default_purchase_cost??null), fee=req.body?.default_monthly_fee===''?null:(req.body?.default_monthly_fee??null), notes=cleanString(req.body?.notes,10000);
+ if(!manufacturer||!modelName||!category||[manufacturer,modelName,category,sku,notes].includes(undefined))return fail(res,400,'Produttore, modello e categoria sono obbligatori.');
+ if(!['sale','rental'].includes(ownership))return fail(res,400,'Tipologia economica non valida.');
+ if((cost!==null&&(!Number.isFinite(Number(cost))||Number(cost)<0))||(fee!==null&&(!Number.isFinite(Number(fee))||Number(fee)<0)))return fail(res,400,'Importi non validi.');
+ try{const result=await pool.query('INSERT INTO device_models(manufacturer,model_name,category,sku,ownership_type,default_purchase_cost,default_monthly_fee,notes) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *',[manufacturer,modelName,category,sku||null,ownership,cost,fee,notes]);res.status(201).json({data:result.rows[0]});}
+ catch(error){if(error.code==='23505')return fail(res,409,'Modello o SKU già presente.');next(error);}
 });
 
+app.put('/device-models/:id', requireRole('admin'), async (req,res,next)=>{
+ const id=parseId(req.params.id), manufacturer=cleanString(req.body?.manufacturer,120), modelName=cleanString(req.body?.model_name,160), category=cleanString(req.body?.category,100), sku=cleanString(req.body?.sku,100);
+ const ownership=req.body?.ownership_type||'sale', cost=req.body?.default_purchase_cost===''?null:(req.body?.default_purchase_cost??null), fee=req.body?.default_monthly_fee===''?null:(req.body?.default_monthly_fee??null), notes=cleanString(req.body?.notes,10000);
+ if(!id)return fail(res,400,'ID modello non valido.');
+ if(!manufacturer||!modelName||!category||[manufacturer,modelName,category,sku,notes].includes(undefined))return fail(res,400,'Produttore, modello e categoria sono obbligatori.');
+ if(!['sale','rental'].includes(ownership)||(cost!==null&&(!Number.isFinite(Number(cost))||Number(cost)<0))||(fee!==null&&(!Number.isFinite(Number(fee))||Number(fee)<0)))return fail(res,400,'Valori del modello non validi.');
+ try{const result=await pool.query('UPDATE device_models SET manufacturer=$1,model_name=$2,category=$3,sku=$4,ownership_type=$5,default_purchase_cost=$6,default_monthly_fee=$7,notes=$8,updated_at=NOW() WHERE id=$9 RETURNING *',[manufacturer,modelName,category,sku||null,ownership,cost,fee,notes,id]);if(!result.rowCount)return fail(res,404,'Modello non trovato.');res.json({data:result.rows[0]});}
+ catch(error){if(error.code==='23505')return fail(res,409,'Modello o SKU già presente.');next(error);}
+});
 app.get('/purchase-profiles', async (_req, res, next) => {
   try {
     const result = await pool.query(
@@ -441,26 +439,23 @@ app.get('/purchase-profiles', async (_req, res, next) => {
   } catch (error) { next(error); }
 });
 
-app.post('/purchase-profiles', requireRole('admin'), async (req, res, next) => {
-  const modelId = parseId(req.body?.device_model_id);
-  const supplier = cleanString(req.body?.supplier, 200);
-  const reference = cleanString(req.body?.reference, 200);
-  const purchasedOn = req.body?.purchased_on || null;
-  const unitCost = req.body?.unit_cost === '' || req.body?.unit_cost === undefined ? null : Number(req.body.unit_cost);
-  const monthlyFee = req.body?.monthly_fee === '' || req.body?.monthly_fee === undefined ? null : Number(req.body.monthly_fee);
-  const usefulLife = req.body?.useful_life_months === '' || req.body?.useful_life_months === undefined ? null : Number(req.body.useful_life_months);
-  const notes = cleanString(req.body?.notes, 10000);
-  if (!modelId || [supplier, reference, notes].includes(undefined)) return fail(res, 400, 'Modello o campi non validi.');
-  if ((unitCost !== null && (!Number.isFinite(unitCost) || unitCost < 0)) || (monthlyFee !== null && (!Number.isFinite(monthlyFee) || monthlyFee < 0)) || (usefulLife !== null && (!Number.isInteger(usefulLife) || usefulLife < 1))) return fail(res, 400, 'Valori economici o vita utile non validi.');
-  try {
-    const result = await pool.query(
-      'INSERT INTO purchase_profiles(device_model_id, supplier, reference, purchased_on, unit_cost, monthly_fee, useful_life_months, notes) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *',
-      [modelId, supplier, reference, purchasedOn, unitCost, monthlyFee, usefulLife, notes]
-    );
-    res.status(201).json({ data: result.rows[0] });
-  } catch (error) { if (error.code === '23503') return fail(res, 400, 'Modello inesistente.'); next(error); }
+app.post('/purchase-profiles', requireRole('admin'), async (req,res,next)=>{
+ const modelId=parseId(req.body?.device_model_id), supplier=cleanString(req.body?.supplier,200), reference=cleanString(req.body?.reference,200), purchasedOn=req.body?.purchased_on||null;
+ const unitCost=req.body?.unit_cost===''||req.body?.unit_cost===undefined?null:Number(req.body.unit_cost), monthlyFee=req.body?.monthly_fee===''||req.body?.monthly_fee===undefined?null:Number(req.body.monthly_fee);
+ const quantity=Number(req.body?.quantity??1), stockLocationId=req.body?.stock_location_id?parseId(req.body.stock_location_id):null, notes=cleanString(req.body?.notes,10000);
+ if(!modelId||[supplier,reference,notes].includes(undefined)||!Number.isInteger(quantity)||quantity<1||quantity>100000)return fail(res,400,'Modello, quantità o campi non validi.');
+ if((unitCost!==null&&(!Number.isFinite(unitCost)||unitCost<0))||(monthlyFee!==null&&(!Number.isFinite(monthlyFee)||monthlyFee<0)))return fail(res,400,'Valori economici non validi.');
+ const client=await pool.connect();
+ try{
+  await client.query('BEGIN');
+  const result=await client.query('INSERT INTO purchase_profiles(device_model_id,supplier,reference,purchased_on,unit_cost,monthly_fee,quantity,stock_location_id,notes) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *',[modelId,supplier,reference,purchasedOn,unitCost,monthlyFee,quantity,stockLocationId,notes]);
+  if(stockLocationId){
+   await client.query('INSERT INTO product_stock(device_model_id,stock_location_id,quantity) VALUES($1,$2,$3) ON CONFLICT(device_model_id,stock_location_id) DO UPDATE SET quantity=product_stock.quantity+EXCLUDED.quantity,updated_at=NOW()',[modelId,stockLocationId,quantity]);
+   await client.query("INSERT INTO product_stock_movements(device_model_id,stock_location_id,quantity_delta,movement_type,purchase_profile_id,notes,moved_by) VALUES($1,$2,$3,'order',$4,$5,$6)",[modelId,stockLocationId,quantity,result.rows[0].id,'Carico ordine '+(reference||result.rows[0].id),req.user.id]);
+  }
+  await client.query('COMMIT');res.status(201).json({data:result.rows[0]});
+ }catch(error){await client.query('ROLLBACK');if(error.code==='23503')return fail(res,400,'Modello o magazzino inesistente.');next(error);}finally{client.release();}
 });
-
 app.get('/devices', async (req, res, next) => {
   const filter = queryBranch(req);
   if (filter.error) return fail(res, 400, filter.error);
@@ -544,6 +539,42 @@ app.post('/stock/locations', requireRole('admin', 'warehouse'), async (req, res,
   } catch (error) { if (error.code === '23505') return fail(res, 409, 'Magazzino già presente.'); next(error); }
 });
 
+app.get('/product-stock',async(_req,res,next)=>{
+ try{const result=await pool.query('SELECT ps.*,m.sku,m.manufacturer,m.model_name,sl.name AS stock_location_name FROM product_stock ps JOIN device_models m ON m.id=ps.device_model_id JOIN stock_locations sl ON sl.id=ps.stock_location_id ORDER BY m.manufacturer,m.model_name,sl.name');res.json({data:result.rows});}catch(error){next(error);}
+});
+
+app.post('/devices/:id/activate',requireRole('admin','technician','warehouse'),async(req,res,next)=>{
+ const id=parseId(req.params.id),branchId=parseId(req.body?.branch_id),ownership=req.body?.ownership_type;
+ const salePrice=req.body?.sale_price===''||req.body?.sale_price===undefined?null:Number(req.body.sale_price),activatedOn=req.body?.activated_on||new Date().toISOString().slice(0,10);
+ if(!id||!branchId||!['sale','rental'].includes(ownership))return fail(res,400,'Device, filiale e formula DDE/NOL sono obbligatori.');
+ if(ownership==='sale'&&(salePrice===null||!Number.isFinite(salePrice)||salePrice<0))return fail(res,400,'Per DDE è obbligatorio il prezzo di vendita.');
+ const client=await pool.connect();
+ try{
+  await client.query('BEGIN');
+  const found=await client.query('SELECT d.*,m.default_monthly_fee FROM devices d JOIN device_models m ON m.id=d.model_id WHERE d.id=$1 FOR UPDATE',[id]);
+  if(!found.rowCount){await client.query('ROLLBACK');return fail(res,404,'Device non trovato.');}
+  const device=found.rows[0],fee=req.body?.monthly_fee===''||req.body?.monthly_fee===undefined?(device.monthly_fee??device.default_monthly_fee):Number(req.body.monthly_fee);
+  if(ownership==='rental'&&(fee===null||!Number.isFinite(Number(fee))||Number(fee)<0)){await client.query('ROLLBACK');return fail(res,400,'Per NOL è obbligatorio un canone mensile valido.');}
+  if(device.branch_id===null&&device.stock_location_id&&!device.stock_consumed){
+   const stock=await client.query('UPDATE product_stock SET quantity=quantity-1,updated_at=NOW() WHERE device_model_id=$1 AND stock_location_id=$2 AND quantity>0 RETURNING quantity',[device.model_id,device.stock_location_id]);
+   if(!stock.rowCount){await client.query('ROLLBACK');return fail(res,409,'Quantità disponibile insufficiente nel magazzino selezionato.');}
+   await client.query("INSERT INTO product_stock_movements(device_model_id,stock_location_id,quantity_delta,movement_type,device_id,notes,moved_by) VALUES($1,$2,-1,'activation',$3,$4,$5)",[device.model_id,device.stock_location_id,id,'Attivazione presso filiale '+branchId,req.user.id]);
+  }
+  await client.query("UPDATE devices SET branch_id=$1,status='operational',ownership_type=$2,sale_price=$3,monthly_fee=$4,activated_on=$5,deactivated_on=NULL,installed_on=$5,stock_consumed=TRUE,updated_at=NOW() WHERE id=$6",[branchId,ownership,ownership==='sale'?salePrice:null,ownership==='rental'?fee:null,activatedOn,id]);
+  if(ownership==='rental')await client.query('INSERT INTO device_nol_history(device_id,branch_id,activated_on,monthly_fee,purchase_cost) VALUES($1,$2,$3,$4,$5)',[id,branchId,activatedOn,fee,device.purchase_cost??0]);
+  await client.query('COMMIT');res.json({data:{id,branch_id:branchId,ownership_type:ownership,sale_price:ownership==='sale'?salePrice:null,monthly_fee:ownership==='rental'?fee:null,activated_on:activatedOn}});
+ }catch(error){await client.query('ROLLBACK');if(error.code==='23503')return fail(res,400,'Filiale o device non valido.');next(error);}finally{client.release();}
+});
+
+app.post('/devices/:id/deactivate',requireRole('admin','technician','warehouse'),async(req,res,next)=>{
+ const id=parseId(req.params.id),deactivatedOn=req.body?.deactivated_on||new Date().toISOString().slice(0,10);if(!id)return fail(res,400,'ID device non valido.');
+ const client=await pool.connect();
+ try{await client.query('BEGIN');const found=await client.query('SELECT * FROM devices WHERE id=$1 FOR UPDATE',[id]);if(!found.rowCount){await client.query('ROLLBACK');return fail(res,404,'Device non trovato.');}
+ const device=found.rows[0];if(device.ownership_type==='rental')await client.query('UPDATE device_nol_history SET deactivated_on=$1 WHERE device_id=$2 AND deactivated_on IS NULL',[deactivatedOn,id]);
+ await client.query("UPDATE devices SET deactivated_on=$1,status='in_stock',branch_id=NULL,updated_at=NOW() WHERE id=$2",[deactivatedOn,id]);await client.query('COMMIT');res.status(204).end();
+ }catch(error){await client.query('ROLLBACK');next(error);}finally{client.release();}
+});
+
 app.get('/stock/movements', async (_req, res, next) => {
   try {
     const result = await pool.query(
@@ -619,18 +650,31 @@ app.patch('/checklist-items/:id', requireRole('admin', 'technician'), async (req
   } catch (error) { next(error); }
 });
 
-app.get('/finance/dashboard', async (req, res, next) => {
-  const filter = queryBranch(req);
-  if (filter.error) return fail(res, 400, filter.error);
-  try {
-    const result = await pool.query(
-      'SELECT COUNT(*)::int AS devices, COALESCE(SUM(d.purchase_cost),0)::numeric AS purchase_cost, COALESCE(SUM(d.monthly_fee),0)::numeric AS monthly_fees, COUNT(*) FILTER (WHERE d.ownership_type = \'rental\')::int AS rental_devices, COUNT(*) FILTER (WHERE d.ownership_type = \'sale\')::int AS owned_devices FROM devices d WHERE ($1::bigint IS NULL OR d.branch_id = $1)',
-      [filter.id]
-    );
-    res.json({ data: result.rows[0] });
-  } catch (error) { next(error); }
+app.get('/finance/dashboard',async(req,res,next)=>{
+ const filter=queryBranch(req);if(filter.error)return fail(res,400,filter.error);
+ try{
+ const result=await pool.query(`
+ WITH nol AS (
+  SELECT h.*,GREATEST(0,EXTRACT(YEAR FROM age(COALESCE(h.deactivated_on,CURRENT_DATE),h.activated_on))::int*12+EXTRACT(MONTH FROM age(COALESCE(h.deactivated_on,CURRENT_DATE),h.activated_on))::int) AS complete_months
+  FROM device_nol_history h WHERE ($1::bigint IS NULL OR h.branch_id=$1)
+ ), totals AS (
+  SELECT COALESCE(SUM(monthly_fee*complete_months),0)::numeric AS nol_all_time,
+   COALESCE(SUM(CASE WHEN complete_months>0 AND activated_on<(date_trunc('month',CURRENT_DATE)+INTERVAL '1 month')::date AND COALESCE(deactivated_on,CURRENT_DATE)>=date_trunc('month',CURRENT_DATE)::date THEN monthly_fee ELSE 0 END),0)::numeric AS nol_current_month,
+   COALESCE(SUM(monthly_fee*complete_months-purchase_cost),0)::numeric AS nol_balance FROM nol
+ ), sales AS (
+  SELECT COALESCE(SUM(sale_price),0)::numeric AS sales_all_time,
+   COALESCE(SUM(sale_price) FILTER(WHERE COALESCE(activated_on,installed_on,created_at::date)>=date_trunc('month',CURRENT_DATE)::date AND COALESCE(activated_on,installed_on,created_at::date)<(date_trunc('month',CURRENT_DATE)+INTERVAL '1 month')::date),0)::numeric AS sales_current_month
+  FROM devices d WHERE d.ownership_type='sale' AND d.sale_price IS NOT NULL AND ($1::bigint IS NULL OR d.branch_id=$1)
+ )
+ SELECT (SELECT COUNT(*)::int FROM devices d WHERE ($1::bigint IS NULL OR d.branch_id=$1)) AS devices,
+ (SELECT COALESCE(SUM(d.purchase_cost),0)::numeric FROM devices d WHERE ($1::bigint IS NULL OR d.branch_id=$1)) AS purchase_cost,
+ (SELECT COALESCE(SUM(d.monthly_fee),0)::numeric FROM devices d WHERE d.ownership_type='rental' AND d.status<>'decommissioned' AND ($1::bigint IS NULL OR d.branch_id=$1)) AS monthly_fees,
+ (SELECT COUNT(*)::int FROM devices d WHERE d.ownership_type='rental' AND ($1::bigint IS NULL OR d.branch_id=$1)) AS rental_devices,
+ (SELECT COUNT(*)::int FROM devices d WHERE d.ownership_type='sale' AND ($1::bigint IS NULL OR d.branch_id=$1)) AS owned_devices,
+ totals.nol_current_month,totals.nol_all_time,totals.nol_balance,sales.sales_current_month,sales.sales_all_time FROM totals CROSS JOIN sales
+ `,[filter.id]);res.json({data:result.rows[0]});
+ }catch(error){next(error);}
 });
-
 app.get('/admin/users', requireRole('admin'), async (_req, res, next) => {
   try {
     const result = await pool.query('SELECT id, username, display_name, role, is_active, created_at FROM users ORDER BY display_name, username');
