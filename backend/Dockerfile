@@ -5,7 +5,7 @@ WORKDIR /app
 COPY package.json ./
 RUN npm install --omit=dev --package-lock=false && npm cache clean --force
 
-COPY server.js ./
+COPY server.js finance-metrics.js ./
 COPY migrations ./migrations
 
 USER node
