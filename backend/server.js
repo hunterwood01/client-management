@@ -1038,7 +1038,7 @@ app.get('/license-finance', requireRole('admin'), async (_req, res, next) => {
 app.get('/finance/dashboard',async(req,res,next)=>{
  const filter=queryBranch(req);if(filter.error)return fail(res,400,filter.error);
  try{
- const result=await pool.query(\`
+ const result=await pool.query(`
  WITH months AS (
   SELECT generate_series(
     COALESCE((SELECT date_trunc('month',MIN(starts_on))::date FROM global_monthly_charges), date_trunc('month',CURRENT_DATE)::date),
@@ -1131,7 +1131,7 @@ app.get('/finance/dashboard',async(req,res,next)=>{
  charge_totals.global_charges_current_month,charge_totals.global_charges_all_time,
  (totals.nol_all_time+sales.sales_all_time+charge_totals.global_charges_all_time-costs.hardware_costs-costs.license_costs-costs.other_costs-charge_totals.global_charge_costs_all_time)::numeric AS overall_margin
  FROM totals CROSS JOIN sales CROSS JOIN costs CROSS JOIN charge_totals
- \`,[filter.id]);res.json({data:result.rows[0]});
+ `,[filter.id]);res.json({data:result.rows[0]});
  }catch(error){next(error);}
 });
 app.get('/admin/users', requireRole('admin'), async (_req, res, next) => {
