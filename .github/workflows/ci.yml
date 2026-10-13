@@ -35,3 +35,6 @@ jobs:
       - name: Check backend syntax
         run: npm run check
         working-directory: backend
+      - name: Test backend finance metrics
+        run: npm test
+        working-directory: backend
