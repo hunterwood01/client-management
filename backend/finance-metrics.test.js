@@ -4,7 +4,7 @@ import { calculateLicenseFinanceMetrics } from './finance-metrics.js';
 
 test('projects the full contract term using the current active-branch monthly revenue', () => {
   const result = calculateLicenseFinanceMetrics({
-    investment: 1000,
+    investment: 800,
     currentMonth: '2026-10-01',
     monthlyTimeline: [
       { month: '2026-10-01', monthly_revenue: 300 },
@@ -13,8 +13,8 @@ test('projects the full contract term using the current active-branch monthly re
     ]
   });
   assert.equal(result.recovered, 300);
-  assert.equal(result.amountToRecover, 700);
-  assert.equal(result.recoveryPercent, 30);
+  assert.equal(result.amountToRecover, 500);
+  assert.equal(result.recoveryPercent, 37.5);
   assert.equal(result.projectedRevenue, 900);
   assert.equal(result.projectedMargin, -100);
   assert.equal(result.breakEvenDate, '2026-12-01');
