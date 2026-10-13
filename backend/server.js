@@ -248,14 +248,53 @@ app.get('/dashboard', async (req, res, next) => {
   const filter = queryBranch(req);
   if (filter.error) return fail(res, 400, filter.error);
   try {
-    const [branches, devices, faults, monthly, stock] = await Promise.all([
+    const [branches, devices, faults, monthly, stock, globalMonthly] = await Promise.all([
       pool.query('SELECT COUNT(*)::int AS count FROM branches WHERE ($1::bigint IS NULL OR id = $1)', [filter.id]),
       pool.query("SELECT COUNT(*)::int AS count FROM devices WHERE ($1::bigint IS NULL OR branch_id = $1)", [filter.id]),
       pool.query("SELECT COUNT(*)::int AS count FROM devices WHERE status = 'fault' AND ($1::bigint IS NULL OR branch_id = $1)", [filter.id]),
-      pool.query('SELECT COALESCE(SUM(monthly_fee), 0)::numeric AS amount FROM devices WHERE ($1::bigint IS NULL OR branch_id = $1)', [filter.id]),
-      pool.query("SELECT COUNT(*)::int AS count FROM devices WHERE status = 'in_stock' AND ($1::bigint IS NULL OR branch_id = $1)", [filter.id])
+      pool.query("SELECT COALESCE(SUM(monthly_fee), 0)::numeric AS amount FROM devices WHERE ownership_type = 'rental' AND status <> 'decommissioned' AND ($1::bigint IS NULL OR branch_id = $1)", [filter.id]),
+      pool.query("SELECT COUNT(*)::int AS count FROM devices WHERE status = 'in_stock' AND ($1::bigint IS NULL OR branch_id = $1)", [filter.id]),
+      pool.query(`
+        WITH current_branches AS (
+          SELECT b.id,
+            COALESCE(
+              (SELECT h.is_active FROM branch_active_history h
+               WHERE h.branch_id = b.id
+                 AND h.active_since <= date_trunc('month', CURRENT_DATE)::date
+               ORDER BY h.active_since DESC, h.recorded_at DESC, h.id DESC LIMIT 1),
+              (b.is_active AND b.active_since <= date_trunc('month', CURRENT_DATE)::date),
+              FALSE
+            ) AS is_active
+          FROM branches b
+          WHERE ($1::bigint IS NULL OR b.id = $1)
+        )
+        SELECT COALESCE(SUM(
+          g.monthly_amount * CASE
+            WHEN $1::bigint IS NOT NULL THEN
+              CASE WHEN EXISTS (
+                SELECT 1 FROM current_branches cb
+                WHERE cb.id = $1 AND cb.is_active
+                  AND (g.apply_to_all OR EXISTS (
+                    SELECT 1 FROM global_monthly_charge_branches gb
+                    WHERE gb.charge_id = g.id AND gb.branch_id = cb.id
+                  ))
+              ) THEN 1 ELSE 0 END
+            WHEN g.apply_to_all THEN (SELECT COUNT(*) FROM current_branches cb WHERE cb.is_active)
+            ELSE (
+              SELECT COUNT(*) FROM global_monthly_charge_branches gb
+              JOIN current_branches cb ON cb.id = gb.branch_id AND cb.is_active
+              WHERE gb.charge_id = g.id
+            )
+          END
+        ), 0)::numeric AS amount
+        FROM global_monthly_charges g
+        WHERE g.starts_on <= date_trunc('month', CURRENT_DATE)::date
+          AND date_trunc('month', CURRENT_DATE)::date <
+            date_trunc('month', g.starts_on)::date + (g.duration_months * INTERVAL '1 month')
+      `, [filter.id])
     ]);
-    res.json({ data: { branches: branches.rows[0].count, devices: devices.rows[0].count, faults: faults.rows[0].count, monthlyFees: monthly.rows[0].amount, stock: stock.rows[0].count } });
+    const monthlyFees = Number(monthly.rows[0].amount || 0) + Number(globalMonthly.rows[0].amount || 0);
+    res.json({ data: { branches: branches.rows[0].count, devices: devices.rows[0].count, faults: faults.rows[0].count, monthlyFees, stock: stock.rows[0].count } });
   } catch (error) { next(error); }
 });
 
