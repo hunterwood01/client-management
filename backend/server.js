@@ -1,4 +1,5 @@
 import express from 'express';
+import { calculateLicenseFinanceMetrics } from './finance-metrics.js';
 import pg from 'pg';
 import { createHash, createHmac, randomBytes, scrypt as scryptCallback, timingSafeEqual } from 'node:crypto';
 import { promisify } from 'node:util';
@@ -1053,9 +1054,6 @@ app.get('/license-finance', requireRole('admin'), async (_req, res, next) => {
         : monthIndex(order.renewal_on);
       const validTerm = start !== null && end !== null && end > start;
       const monthlyTimeline = [];
-      let recovered = 0;
-      let projectedNetRevenue = 0;
-      let breakEvenDate = null;
       if (validTerm) {
         for (let m = start; m < end; m++) {
           const month = monthDate(m);
@@ -1101,11 +1099,13 @@ app.get('/license-finance', requireRole('admin'), async (_req, res, next) => {
             net_contribution: Number(snapshot.net_contribution)
           };
           monthlyTimeline.push(row);
-          if (Date.parse(month + 'T00:00:00Z') <= currentMonth) recovered += row.monthly_revenue;
-          projectedNetRevenue += row.monthly_revenue;
-          if (!breakEvenDate && investment > 0 && projectedNetRevenue >= investment) breakEvenDate = monthDate(m + 1);
         }
       }
+      const metrics = calculateLicenseFinanceMetrics({
+        investment,
+        monthlyTimeline,
+        currentMonth: monthDate(today.getUTCFullYear() * 12 + today.getUTCMonth())
+      });
       const currentRow = monthlyTimeline.find((item) => item.month === monthDate(today.getUTCFullYear() * 12 + today.getUTCMonth()));
       data.push({
         ...order,
@@ -1113,12 +1113,12 @@ app.get('/license-finance', requireRole('admin'), async (_req, res, next) => {
         active_branches_now: currentRow?.active_branches ?? activeBranchesAt(today.getUTCFullYear() * 12 + today.getUTCMonth()),
         monthly_revenue_now: currentRow?.monthly_revenue ?? 0,
         monthly_cost_now: currentRow?.monthly_cost ?? 0,
-        recovered_to_date: validTerm ? recovered : null,
-        amount_to_recover: validTerm ? Math.max(0, investment - recovered) : null,
-        recovery_percent: validTerm && investment > 0 ? Math.max(0, Math.min(100, recovered / investment * 100)) : null,
-        projected_net_revenue: validTerm ? projectedNetRevenue : null,
-        projected_margin: validTerm ? projectedNetRevenue - investment : null,
-        break_even_date: validTerm ? breakEvenDate : null,
+        recovered_to_date: validTerm ? metrics.recovered : null,
+        amount_to_recover: validTerm ? metrics.amountToRecover : null,
+        recovery_percent: validTerm ? metrics.recoveryPercent : null,
+        projected_net_revenue: validTerm ? metrics.projectedRevenue : null,
+        projected_margin: validTerm ? metrics.projectedMargin : null,
+        break_even_date: validTerm ? metrics.breakEvenDate : null,
         term_complete: validTerm,
         monthly_timeline: monthlyTimeline
       });
