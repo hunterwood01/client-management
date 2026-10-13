@@ -1066,7 +1066,7 @@ app.get('/license-finance', requireRole('admin'), async (_req, res, next) => {
           };
           monthlyTimeline.push(row);
           if (Date.parse(month + 'T00:00:00Z') < currentMonth) recovered += row.monthly_revenue;
-          projectedNetRevenue += row.net_contribution;
+          projectedNetRevenue += row.monthly_revenue;
           if (!breakEvenDate && investment > 0 && projectedNetRevenue >= investment) breakEvenDate = monthDate(m + 1);
         }
       }
