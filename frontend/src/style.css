@@ -311,3 +311,13 @@ tbody tr:hover td { background: color-mix(in srgb, var(--surface-soft) 72%, tran
 .history-delete-button { flex: 0 0 auto; display: grid; place-items: center; width: 28px; height: 28px; margin-left: auto; border: 1px solid var(--border); border-radius: 8px; color: #c13d4d; background: transparent; font-size: 19px; line-height: 1; }
 .history-delete-button:hover { background: #ffe8eb; border-color: #f3b8c0; }
 .history-delete-button:disabled { opacity: .5; cursor: not-allowed; }
+
+/* CSV device import preview */
+.modal:has(.import-preview) { width: min(1180px, 100%); }
+.import-preview { display: flex; flex-direction: column; gap: 14px; }
+.import-table { max-height: 55vh; overflow: auto; }
+.import-table table { min-width: 920px; }
+.import-table select { min-width: 170px; max-width: 240px; }
+.import-table td { vertical-align: top; }
+.import-warning { display: block; margin-top: 5px; color: #b45309; font-size: 10px; }
+.page-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
