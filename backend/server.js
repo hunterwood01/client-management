@@ -1058,7 +1058,7 @@ app.get('/finance/dashboard',async(req,res,next)=>{
  ), charge_rows AS (
   SELECT g.*,
    CASE WHEN $1::bigint IS NOT NULL THEN CASE WHEN g.apply_to_all THEN 1 ELSE (SELECT COUNT(*) FROM global_monthly_charge_branches gb WHERE gb.charge_id=g.id AND gb.branch_id=$1) END
-   ELSE CASE WHEN g.apply_to_all THEN (SELECT COUNT(*) FROM branches) ELSE (SELECT COUNT(*) FROM global_monthly_charge_branches gb WHERE gb.charge_id=g.id) END END::numeric AS branch_count,
+   ELSE CASE WHEN g.apply_to_all THEN (SELECT COUNT(*) FROM branches b WHERE b.is_active=TRUE) ELSE (SELECT COUNT(*) FROM global_monthly_charge_branches gb JOIN branches b ON b.id=gb.branch_id WHERE gb.charge_id=g.id AND b.is_active=TRUE) END END::numeric AS branch_count,
    LEAST(g.duration_months, GREATEST(0, EXTRACT(YEAR FROM age(CURRENT_DATE,g.starts_on))::int*12 + EXTRACT(MONTH FROM age(CURRENT_DATE,g.starts_on))::int + 1)) AS accrued_months
   FROM global_monthly_charges g
  ), charge_totals AS (
