@@ -54,7 +54,7 @@ function downloadCsv(filename, columns, rows) {
 }
 
 function parseDeviceCsv(text) {
-  const lines = String(text || '').replace(/^\\uFEFF/, '').split(/\\r?\\n/).filter((line) => line.trim());
+  const lines = String(text || '').replace(/^\uFEFF/, '').split(/\r?\n/).filter((line) => line.trim());
   if (lines.length < 2) throw new Error('Il CSV non contiene righe dispositivo.');
   const delimiterCount = (line, delimiter) => {
     let quoted = false, count = 0;
