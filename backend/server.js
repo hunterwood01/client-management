@@ -1038,8 +1038,27 @@ app.get('/license-finance', requireRole('admin'), async (_req, res, next) => {
 app.get('/finance/dashboard',async(req,res,next)=>{
  const filter=queryBranch(req);if(filter.error)return fail(res,400,filter.error);
  try{
- const result=await pool.query(`
- WITH nol AS (
+ const result=await pool.query(\`
+ WITH months AS (
+  SELECT generate_series(
+    COALESCE((SELECT date_trunc('month',MIN(starts_on))::date FROM global_monthly_charges), date_trunc('month',CURRENT_DATE)::date),
+    date_trunc('month',CURRENT_DATE)::date,
+    INTERVAL '1 month'
+  )::date AS month_start
+ ), branch_month_activity AS (
+  SELECT m.month_start,b.id AS branch_id,
+   COALESCE(
+    (SELECT h.is_active FROM branch_active_history h
+     WHERE h.branch_id=b.id AND h.active_since<=m.month_start
+     ORDER BY h.active_since DESC,h.recorded_at DESC,h.id DESC LIMIT 1),
+    (b.is_active AND b.active_since<=m.month_start),
+    FALSE
+   ) AS is_active
+  FROM months m CROSS JOIN branches b
+ ), branch_counts AS (
+  SELECT month_start,COUNT(*) FILTER(WHERE is_active)::numeric AS active_count
+  FROM branch_month_activity GROUP BY month_start
+ ), nol AS (
   SELECT h.*,GREATEST(0,EXTRACT(YEAR FROM age(COALESCE(h.deactivated_on,CURRENT_DATE),h.activated_on))::int*12+EXTRACT(MONTH FROM age(COALESCE(h.deactivated_on,CURRENT_DATE),h.activated_on))::int) AS complete_months
   FROM device_nol_history h WHERE ($1::bigint IS NULL OR h.branch_id=$1)
  ), totals AS (
@@ -1052,32 +1071,67 @@ app.get('/finance/dashboard',async(req,res,next)=>{
   FROM devices d WHERE d.ownership_type='sale' AND d.sale_price IS NOT NULL AND ($1::bigint IS NULL OR d.branch_id=$1)
  ), costs AS (
   SELECT
-   COALESCE((SELECT SUM(COALESCE(p.unit_cost,0)*COALESCE(p.quantity,1)) FROM purchase_profiles p),0)::numeric AS hardware_costs,
-   COALESCE((SELECT SUM(COALESCE(l.unit_cost,0)*COALESCE(l.quantity,1)) FROM license_purchase_orders l),0)::numeric AS license_costs,
+   CASE WHEN $1::bigint IS NULL THEN
+    COALESCE((SELECT SUM(COALESCE(p.unit_cost,0)*COALESCE(p.quantity,1)) FROM purchase_profiles p),0)
+   ELSE
+    COALESCE((SELECT SUM(COALESCE(d.purchase_cost,0)) FROM devices d WHERE d.branch_id=$1),0)
+   END::numeric AS hardware_costs,
+   CASE WHEN $1::bigint IS NULL THEN
+    COALESCE((SELECT SUM(COALESCE(l.unit_cost,0)*COALESCE(l.quantity,1)) FROM license_purchase_orders l),0)
+   ELSE
+    COALESCE((
+     SELECT SUM((COALESCE(l.unit_cost,0)*COALESCE(l.quantity,1))/NULLIF(bc.active_count,0))
+     FROM license_purchase_orders l
+     JOIN branch_counts bc ON bc.month_start=date_trunc('month',COALESCE(l.ea_starts_on,l.purchased_on,DATE '2026-10-01'))::date
+     JOIN branch_month_activity selected_branch ON selected_branch.month_start=bc.month_start
+       AND selected_branch.branch_id=$1 AND selected_branch.is_active=TRUE
+     WHERE bc.active_count>0
+    ),0)
+   END::numeric AS license_costs,
    COALESCE((SELECT SUM(fe.amount) FROM finance_entries fe WHERE fe.entry_type IN ('service','other') AND ($1::bigint IS NULL OR fe.branch_id=$1)),0)::numeric AS other_costs
- ), charge_rows AS (
-  SELECT g.*,
-   CASE WHEN $1::bigint IS NOT NULL THEN CASE WHEN g.apply_to_all THEN 1 ELSE (SELECT COUNT(*) FROM global_monthly_charge_branches gb WHERE gb.charge_id=g.id AND gb.branch_id=$1) END
-   ELSE CASE WHEN g.apply_to_all THEN (SELECT COUNT(*) FROM branches b WHERE b.is_active=TRUE) ELSE (SELECT COUNT(*) FROM global_monthly_charge_branches gb JOIN branches b ON b.id=gb.branch_id WHERE gb.charge_id=g.id AND b.is_active=TRUE) END END::numeric AS branch_count,
-   LEAST(g.duration_months, GREATEST(0, EXTRACT(YEAR FROM age(CURRENT_DATE,g.starts_on))::int*12 + EXTRACT(MONTH FROM age(CURRENT_DATE,g.starts_on))::int + 1)) AS accrued_months
+ ), charge_month_rows AS (
+  SELECT g.*,m.month_start,COALESCE(bc.active_count,0)::numeric AS active_count,
+   CASE WHEN $1::bigint IS NOT NULL THEN
+     CASE WHEN EXISTS (
+       SELECT 1 FROM branch_month_activity ba
+       WHERE ba.month_start=m.month_start AND ba.branch_id=$1 AND ba.is_active
+         AND (g.apply_to_all OR EXISTS (
+           SELECT 1 FROM global_monthly_charge_branches gb
+           WHERE gb.charge_id=g.id AND gb.branch_id=$1
+         ))
+     ) THEN 1 ELSE 0 END
+   WHEN g.apply_to_all THEN COALESCE(bc.active_count,0)
+   ELSE (
+     SELECT COUNT(*)::numeric
+     FROM global_monthly_charge_branches gb
+     JOIN branch_month_activity ba ON ba.branch_id=gb.branch_id AND ba.month_start=m.month_start AND ba.is_active
+     WHERE gb.charge_id=g.id
+   ) END AS branch_count
   FROM global_monthly_charges g
+  JOIN months m ON m.month_start>=date_trunc('month',g.starts_on)::date
+    AND m.month_start<date_trunc('month',g.starts_on)::date+(g.duration_months*INTERVAL '1 month')
+  LEFT JOIN branch_counts bc ON bc.month_start=m.month_start
  ), charge_totals AS (
-  SELECT COALESCE(SUM(monthly_amount*branch_count*accrued_months),0)::numeric AS global_charges_all_time,
-   COALESCE(SUM(CASE WHEN starts_on <= (date_trunc('month',CURRENT_DATE)+INTERVAL '1 month - 1 day')::date AND starts_on + duration_months * INTERVAL '1 month' > date_trunc('month',CURRENT_DATE)::date THEN monthly_amount*branch_count ELSE 0 END),0)::numeric AS global_charges_current_month,
-   COALESCE(SUM(monthly_cost*branch_count*accrued_months),0)::numeric AS global_charge_costs_all_time
-  FROM charge_rows WHERE branch_count > 0
+  SELECT COALESCE(SUM(monthly_amount*branch_count),0)::numeric AS global_charges_all_time,
+   COALESCE(SUM(monthly_amount*branch_count) FILTER(WHERE month_start=date_trunc('month',CURRENT_DATE)::date),0)::numeric AS global_charges_current_month,
+   COALESCE(SUM(monthly_cost*branch_count),0)::numeric AS global_charge_costs_all_time
+  FROM charge_month_rows
  )
  SELECT (SELECT COUNT(*)::int FROM devices d WHERE ($1::bigint IS NULL OR d.branch_id=$1)) AS devices,
  (SELECT COALESCE(SUM(d.purchase_cost),0)::numeric FROM devices d WHERE ($1::bigint IS NULL OR d.branch_id=$1)) AS purchase_cost,
  (SELECT COALESCE(SUM(d.monthly_fee),0)::numeric FROM devices d WHERE d.ownership_type='rental' AND d.status<>'decommissioned' AND ($1::bigint IS NULL OR d.branch_id=$1)) AS monthly_fees,
  (SELECT COUNT(*)::int FROM devices d WHERE d.ownership_type='rental' AND ($1::bigint IS NULL OR d.branch_id=$1)) AS rental_devices,
  (SELECT COUNT(*)::int FROM devices d WHERE d.ownership_type='sale' AND ($1::bigint IS NULL OR d.branch_id=$1)) AS owned_devices,
- (totals.nol_current_month+charge_totals.global_charges_current_month)::numeric AS nol_current_month,(totals.nol_all_time+charge_totals.global_charges_all_time)::numeric AS nol_all_time,(totals.nol_balance+charge_totals.global_charges_all_time-charge_totals.global_charge_costs_all_time)::numeric AS nol_balance,sales.sales_current_month,sales.sales_all_time,
- costs.hardware_costs,costs.license_costs,costs.other_costs,(costs.hardware_costs+costs.license_costs+costs.other_costs+charge_totals.global_charge_costs_all_time)::numeric AS total_costs,
+ (totals.nol_current_month+charge_totals.global_charges_current_month)::numeric AS nol_current_month,
+ (totals.nol_all_time+charge_totals.global_charges_all_time)::numeric AS nol_all_time,
+ (totals.nol_balance+charge_totals.global_charges_all_time-charge_totals.global_charge_costs_all_time)::numeric AS nol_balance,
+ sales.sales_current_month,sales.sales_all_time,
+ costs.hardware_costs,costs.license_costs,costs.other_costs,
+ (costs.hardware_costs+costs.license_costs+costs.other_costs+charge_totals.global_charge_costs_all_time)::numeric AS total_costs,
  charge_totals.global_charges_current_month,charge_totals.global_charges_all_time,
  (totals.nol_all_time+sales.sales_all_time+charge_totals.global_charges_all_time-costs.hardware_costs-costs.license_costs-costs.other_costs-charge_totals.global_charge_costs_all_time)::numeric AS overall_margin
  FROM totals CROSS JOIN sales CROSS JOIN costs CROSS JOIN charge_totals
- `,[filter.id]);res.json({data:result.rows[0]});
+ \`,[filter.id]);res.json({data:result.rows[0]});
  }catch(error){next(error);}
 });
 app.get('/admin/users', requireRole('admin'), async (_req, res, next) => {
