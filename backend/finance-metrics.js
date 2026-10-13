@@ -12,7 +12,6 @@ export function calculateLicenseFinanceMetrics({ investment, monthlyTimeline, cu
   for (const row of timeline) {
     const actualRevenue = Number(row.monthly_revenue) || 0;
     const isPast = row.month < currentMonth;
-    const isCurrentOrFuture = row.month >= currentMonth;
     const forecastRevenue = isPast ? actualRevenue : currentMonthlyRevenue;
 
     if (row.month <= currentMonth) recovered += actualRevenue;
@@ -23,8 +22,6 @@ export function calculateLicenseFinanceMetrics({ investment, monthlyTimeline, cu
       const [year, month] = row.month.split('-').map(Number);
       breakEvenDate = new Date(Date.UTC(year, month, 1)).toISOString().slice(0, 10);
     }
-    // Keep the variable explicit so the intent remains clear if the forecast horizon changes.
-    void isCurrentOrFuture;
   }
 
   return {
