@@ -1065,12 +1065,11 @@ app.get('/license-finance', requireRole('admin'), async (_req, res, next) => {
             net_contribution: Number(snapshot.net_contribution)
           };
           monthlyTimeline.push(row);
-          if (Date.parse(month + 'T00:00:00Z') < currentMonth) recovered += row.net_contribution;
+          if (Date.parse(month + 'T00:00:00Z') < currentMonth) recovered += row.monthly_revenue;
           projectedNetRevenue += row.net_contribution;
           if (!breakEvenDate && investment > 0 && projectedNetRevenue >= investment) breakEvenDate = monthDate(m + 1);
         }
       }
-      const current = monthlyTimeline.find((item) => item.month === monthDate(currentMonth / 86400000 / 30.4375)) || monthlyTimeline.find((item) => item.month === monthDate(today.getUTCFullYear() * 12 + today.getUTCMonth()));
       const currentRow = monthlyTimeline.find((item) => item.month === monthDate(today.getUTCFullYear() * 12 + today.getUTCMonth()));
       data.push({
         ...order,
