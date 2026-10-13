@@ -988,16 +988,17 @@ app.get('/license-finance', requireRole('admin'), async (_req, res, next) => {
           if (!breakEvenDate && investment > 0 && projectedNetRevenue >= investment) breakEvenDate = addMonths(start, m - first + 1);
         }
       }
+      const termComplete = Boolean(start && end && monthIndex(end) > monthIndex(start));
       return {
         ...order,
         investment_cost: investment,
-        recovered_to_date: recovered,
-        amount_to_recover: Math.max(0, investment - recovered),
-        recovery_percent: investment > 0 ? Math.min(100, recovered / investment * 100) : null,
-        projected_net_revenue: projectedNetRevenue,
-        projected_margin: projectedNetRevenue - investment,
-        break_even_date: breakEvenDate,
-        term_complete: Boolean(start && end),
+        recovered_to_date: termComplete ? recovered : null,
+        amount_to_recover: termComplete ? Math.max(0, investment - recovered) : null,
+        recovery_percent: termComplete && investment > 0 ? Math.min(100, recovered / investment * 100) : null,
+        projected_net_revenue: termComplete ? projectedNetRevenue : null,
+        projected_margin: termComplete ? projectedNetRevenue - investment : null,
+        break_even_date: termComplete ? breakEvenDate : null,
+        term_complete: termComplete,
         global_charges: charges
       };
     });
