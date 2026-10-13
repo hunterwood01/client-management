@@ -876,8 +876,10 @@ app.post('/global-monthly-charges', requireRole('admin'), async (req, res, next)
   const startsOn = req.body?.starts_on;
   const durationMonths = Number(req.body?.duration_months ?? 60);
   const applyToAll = req.body?.apply_to_all === true;
+  const licenseOrderId = req.body?.license_order_id ? parseId(req.body.license_order_id) : null;
+  const monthlyCost = Number(req.body?.monthly_cost ?? 0);
   const branchIds = Array.isArray(req.body?.branch_ids) ? [...new Set(req.body.branch_ids.map(parseId))] : [];
-  if (!description || !startsOn || !/^\\d{4}-\\d{2}-\\d{2}$/.test(startsOn) || !Number.isFinite(monthlyAmount) || monthlyAmount < 0 || !Number.isInteger(durationMonths) || durationMonths < 1 || durationMonths > 600 || (!applyToAll && (!branchIds.length || branchIds.includes(null)))) return fail(res, 400, 'Descrizione, importo, decorrenza, durata e filiali devono essere validi.');
+  if (!description || !startsOn || !/^\d{4}-\d{2}-\d{2}$/.test(startsOn) || !Number.isFinite(monthlyAmount) || monthlyAmount < 0 || !Number.isFinite(monthlyCost) || monthlyCost < 0 || !Number.isInteger(durationMonths) || durationMonths < 1 || durationMonths > 600 || (req.body?.license_order_id && !licenseOrderId) || (!applyToAll && (!branchIds.length || branchIds.includes(null)))) return fail(res, 400, 'Descrizione, importo, costi, decorrenza, durata e filiali devono essere validi.');
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -885,7 +887,7 @@ app.post('/global-monthly-charges', requireRole('admin'), async (req, res, next)
       const valid = await client.query('SELECT COUNT(*)::int AS count FROM branches WHERE id = ANY($1::bigint[])', [branchIds]);
       if (valid.rows[0].count !== branchIds.length) { await client.query('ROLLBACK'); return fail(res, 400, 'Una o più filiali selezionate non esistono.'); }
     }
-    const created = await client.query('INSERT INTO global_monthly_charges(description, monthly_amount, starts_on, duration_months, apply_to_all) VALUES($1,$2,$3,$4,$5) RETURNING *', [description, monthlyAmount, startsOn, durationMonths, applyToAll]);
+    const created = await client.query('INSERT INTO global_monthly_charges(description, monthly_amount, starts_on, duration_months, apply_to_all, license_order_id, monthly_cost) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *', [description, monthlyAmount, startsOn, durationMonths, applyToAll, licenseOrderId, monthlyCost]);
     if (!applyToAll) for (const branchId of branchIds) await client.query('INSERT INTO global_monthly_charge_branches(charge_id, branch_id) VALUES($1,$2)', [created.rows[0].id, branchId]);
     await client.query('COMMIT');
     res.status(201).json({ data: { ...created.rows[0], branch_ids: applyToAll ? [] : branchIds } });
@@ -899,12 +901,14 @@ app.put('/global-monthly-charges/:id', requireRole('admin'), async (req, res, ne
   const startsOn = req.body?.starts_on;
   const durationMonths = Number(req.body?.duration_months ?? 60);
   const applyToAll = req.body?.apply_to_all === true;
+  const licenseOrderId = req.body?.license_order_id ? parseId(req.body.license_order_id) : null;
+  const monthlyCost = Number(req.body?.monthly_cost ?? 0);
   const branchIds = Array.isArray(req.body?.branch_ids) ? [...new Set(req.body.branch_ids.map(parseId))] : [];
-  if (!id || !description || !startsOn || !/^\\d{4}-\\d{2}-\\d{2}$/.test(startsOn) || !Number.isFinite(monthlyAmount) || monthlyAmount < 0 || !Number.isInteger(durationMonths) || durationMonths < 1 || durationMonths > 600 || (!applyToAll && (!branchIds.length || branchIds.includes(null)))) return fail(res, 400, 'Regola, importo, decorrenza, durata e filiali devono essere validi.');
+  if (!id || !description || !startsOn || !/^\d{4}-\d{2}-\d{2}$/.test(startsOn) || !Number.isFinite(monthlyAmount) || monthlyAmount < 0 || !Number.isFinite(monthlyCost) || monthlyCost < 0 || !Number.isInteger(durationMonths) || durationMonths < 1 || durationMonths > 600 || (req.body?.license_order_id && !licenseOrderId) || (!applyToAll && (!branchIds.length || branchIds.includes(null)))) return fail(res, 400, 'Regola, importo, costi, decorrenza, durata e filiali devono essere validi.');
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const updated = await client.query('UPDATE global_monthly_charges SET description=$1, monthly_amount=$2, starts_on=$3, duration_months=$4, apply_to_all=$5, updated_at=NOW() WHERE id=$6 RETURNING *', [description, monthlyAmount, startsOn, durationMonths, applyToAll, id]);
+    const updated = await client.query('UPDATE global_monthly_charges SET description=$1, monthly_amount=$2, starts_on=$3, duration_months=$4, apply_to_all=$5, license_order_id=$6, monthly_cost=$7, updated_at=NOW() WHERE id=$8 RETURNING *', [description, monthlyAmount, startsOn, durationMonths, applyToAll, licenseOrderId, monthlyCost, id]);
     if (!updated.rowCount) { await client.query('ROLLBACK'); return fail(res, 404, 'Canone globale non trovato.'); }
     if (!applyToAll) {
       const valid = await client.query('SELECT COUNT(*)::int AS count FROM branches WHERE id = ANY($1::bigint[])', [branchIds]);
@@ -923,6 +927,84 @@ app.delete('/global-monthly-charges/:id', requireRole('admin'), async (req, res,
   try { const result = await pool.query('DELETE FROM global_monthly_charges WHERE id=$1 RETURNING id', [id]); if (!result.rowCount) return fail(res, 404, 'Canone globale non trovato.'); res.status(204).end(); }
   catch (error) { next(error); }
 });
+app.get('/license-finance', requireRole('admin'), async (_req, res, next) => {
+  try {
+    const result = await pool.query(`
+      SELECT l.*,
+        COALESCE(
+          json_agg(json_build_object(
+            'id', g.id,
+            'description', g.description,
+            'monthly_amount', g.monthly_amount,
+            'monthly_cost', g.monthly_cost,
+            'starts_on', g.starts_on,
+            'duration_months', g.duration_months,
+            'apply_to_all', g.apply_to_all,
+            'branch_count', CASE WHEN g.apply_to_all
+              THEN (SELECT COUNT(*) FROM branches)
+              ELSE (SELECT COUNT(*) FROM global_monthly_charge_branches gb WHERE gb.charge_id = g.id)
+            END
+          )) FILTER (WHERE g.id IS NOT NULL), '[]'::json
+        ) AS global_charges
+      FROM license_purchase_orders l
+      LEFT JOIN global_monthly_charges g ON g.license_order_id = l.id
+      GROUP BY l.id
+      ORDER BY l.purchased_on DESC NULLS LAST, l.created_at DESC
+    `);
+    const today = new Date().toISOString().slice(0, 10);
+    const monthIndex = (value) => {
+      const d = new Date(String(value).slice(0, 10) + 'T00:00:00Z');
+      return d.getUTCFullYear() * 12 + d.getUTCMonth();
+    };
+    const addMonths = (value, count) => {
+      const d = new Date(String(value).slice(0, 10) + 'T00:00:00Z');
+      d.setUTCDate(1);
+      d.setUTCMonth(d.getUTCMonth() + count);
+      return d.toISOString().slice(0, 10);
+    };
+    const data = result.rows.map((order) => {
+      const investment = Number(order.unit_cost || 0) * Number(order.quantity || 1);
+      const start = order.purchased_on ? String(order.purchased_on).slice(0, 10) : null;
+      const end = order.renewal_on ? String(order.renewal_on).slice(0, 10) : null;
+      const charges = (order.global_charges || []).map((charge) => ({
+        ...charge,
+        monthly_amount: Number(charge.monthly_amount || 0),
+        monthly_cost: Number(charge.monthly_cost || 0),
+        branch_count: Number(charge.branch_count || 0),
+        net_monthly: (Number(charge.monthly_amount || 0) - Number(charge.monthly_cost || 0)) * Number(charge.branch_count || 0),
+        charge_start_month: monthIndex(charge.starts_on),
+        charge_end_month: monthIndex(charge.starts_on) + Number(charge.duration_months || 0)
+      }));
+      let recovered = 0;
+      let projectedNetRevenue = 0;
+      let breakEvenDate = null;
+      if (start && end && monthIndex(end) >= monthIndex(start)) {
+        const first = monthIndex(start);
+        const last = monthIndex(end);
+        for (let m = first; m < last; m++) {
+          const netForMonth = charges.reduce((sum, charge) => m >= charge.charge_start_month && m < charge.charge_end_month ? sum + charge.net_monthly : sum, 0);
+          projectedNetRevenue += netForMonth;
+          if (m < monthIndex(today)) recovered += netForMonth;
+          if (!breakEvenDate && investment > 0 && projectedNetRevenue >= investment) breakEvenDate = addMonths(start, m - first + 1);
+        }
+      }
+      return {
+        ...order,
+        investment_cost: investment,
+        recovered_to_date: recovered,
+        amount_to_recover: Math.max(0, investment - recovered),
+        recovery_percent: investment > 0 ? Math.min(100, recovered / investment * 100) : null,
+        projected_net_revenue: projectedNetRevenue,
+        projected_margin: projectedNetRevenue - investment,
+        break_even_date: breakEvenDate,
+        term_complete: Boolean(start && end),
+        global_charges: charges
+      };
+    });
+    res.json({ data });
+  } catch (error) { next(error); }
+});
+
 app.get('/finance/dashboard',async(req,res,next)=>{
  const filter=queryBranch(req);if(filter.error)return fail(res,400,filter.error);
  try{
