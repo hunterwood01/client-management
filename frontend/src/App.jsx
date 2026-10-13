@@ -384,6 +384,17 @@ export default function App() {
 
 
 
+  async function deleteGlobalCharge(charge) {
+    if (!window.confirm('Vuoi eliminare il canone globale "' + charge.description + '"?')) return;
+    setBusy(true); setError(''); setSuccess('');
+    try {
+      await api('/global-monthly-charges/' + charge.id, { method: 'DELETE' });
+      setSuccess('Canone globale eliminato.');
+      await refresh();
+    } catch (err) { setError(err.message); }
+    finally { setBusy(false); }
+  }
+
   if (authLoading) return <div className="boot-screen"><div className="login-mark">CM</div><span>Caricamento workspace…</span></div>;
   if (!user) return <Login onLogin={(loggedUser) => { setUser(loggedUser); setTheme(loggedUser.theme || 'light'); setError(''); }} />;
 
