@@ -1033,7 +1033,8 @@ app.get('/finance/dashboard',async(req,res,next)=>{
   FROM global_monthly_charges g
  ), charge_totals AS (
   SELECT COALESCE(SUM(monthly_amount*branch_count*accrued_months),0)::numeric AS global_charges_all_time,
-   COALESCE(SUM(CASE WHEN starts_on <= (date_trunc('month',CURRENT_DATE)+INTERVAL '1 month - 1 day')::date AND starts_on + duration_months * INTERVAL '1 month' > date_trunc('month',CURRENT_DATE)::date THEN monthly_amount*branch_count ELSE 0 END),0)::numeric AS global_charges_current_month
+   COALESCE(SUM(CASE WHEN starts_on <= (date_trunc('month',CURRENT_DATE)+INTERVAL '1 month - 1 day')::date AND starts_on + duration_months * INTERVAL '1 month' > date_trunc('month',CURRENT_DATE)::date THEN monthly_amount*branch_count ELSE 0 END),0)::numeric AS global_charges_current_month,
+   COALESCE(SUM(monthly_cost*branch_count*accrued_months),0)::numeric AS global_charge_costs_all_time
   FROM charge_rows WHERE branch_count > 0
  )
  SELECT (SELECT COUNT(*)::int FROM devices d WHERE ($1::bigint IS NULL OR d.branch_id=$1)) AS devices,
@@ -1042,9 +1043,9 @@ app.get('/finance/dashboard',async(req,res,next)=>{
  (SELECT COUNT(*)::int FROM devices d WHERE d.ownership_type='rental' AND ($1::bigint IS NULL OR d.branch_id=$1)) AS rental_devices,
  (SELECT COUNT(*)::int FROM devices d WHERE d.ownership_type='sale' AND ($1::bigint IS NULL OR d.branch_id=$1)) AS owned_devices,
  totals.nol_current_month,totals.nol_all_time,totals.nol_balance,sales.sales_current_month,sales.sales_all_time,
- costs.hardware_costs,costs.license_costs,costs.other_costs,(costs.hardware_costs+costs.license_costs+costs.other_costs)::numeric AS total_costs,
+ costs.hardware_costs,costs.license_costs,costs.other_costs,(costs.hardware_costs+costs.license_costs+costs.other_costs+charge_totals.global_charge_costs_all_time)::numeric AS total_costs,
  charge_totals.global_charges_current_month,charge_totals.global_charges_all_time,
- (totals.nol_all_time+sales.sales_all_time+charge_totals.global_charges_all_time-costs.hardware_costs-costs.license_costs-costs.other_costs)::numeric AS overall_margin
+ (totals.nol_all_time+sales.sales_all_time+charge_totals.global_charges_all_time-costs.hardware_costs-costs.license_costs-costs.other_costs-charge_totals.global_charge_costs_all_time)::numeric AS overall_margin
  FROM totals CROSS JOIN sales CROSS JOIN costs CROSS JOIN charge_totals
  `,[filter.id]);res.json({data:result.rows[0]});
  }catch(error){next(error);}
