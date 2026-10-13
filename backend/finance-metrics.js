@@ -20,7 +20,7 @@ export function calculateLicenseFinanceMetrics({ investment, monthlyTimeline, cu
 
     if (!breakEvenDate && totalInvestment > 0 && cumulativeRevenue >= totalInvestment) {
       const [year, month] = row.month.split('-').map(Number);
-      breakEvenDate = new Date(Date.UTC(year, month, 1)).toISOString().slice(0, 10);
+      breakEvenDate = new Date(Date.UTC(year, month - 1, 1)).toISOString().slice(0, 10);
     }
   }
 
