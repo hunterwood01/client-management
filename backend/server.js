@@ -753,8 +753,7 @@ async function syncLicenseOrderCharge(db, order) {
     (description, monthly_amount, starts_on, duration_months, apply_to_all, license_order_id, monthly_cost)
     VALUES ($1, 0, $2, $3, TRUE, $4, 0)
     ON CONFLICT (license_order_id) WHERE license_order_id IS NOT NULL
-    DO UPDATE SET description = EXCLUDED.description, starts_on = EXCLUDED.starts_on,
-      duration_months = EXCLUDED.duration_months, apply_to_all = TRUE`,
+    DO UPDATE SET description = EXCLUDED.description, apply_to_all = TRUE`,
     ['EA · ' + order.license_name, startsOn, durationMonths, order.id]);
 }
 
@@ -950,9 +949,8 @@ app.post('/global-monthly-charges', requireRole('admin'), async (req, res, next)
   const durationMonths = Number(req.body?.duration_months ?? 60);
   const applyToAll = req.body?.apply_to_all === true;
   const licenseOrderId = req.body?.license_order_id ? parseId(req.body.license_order_id) : null;
-  const monthlyCost = Number(req.body?.monthly_cost ?? 0);
   const branchIds = Array.isArray(req.body?.branch_ids) ? [...new Set(req.body.branch_ids.map(parseId))] : [];
-  if (!description || !startsOn || !/^\d{4}-\d{2}-\d{2}$/.test(startsOn) || !Number.isFinite(monthlyAmount) || monthlyAmount < 0 || !Number.isFinite(monthlyCost) || monthlyCost < 0 || !Number.isInteger(durationMonths) || durationMonths < 1 || durationMonths > 600 || (req.body?.license_order_id && !licenseOrderId) || (!applyToAll && (!branchIds.length || branchIds.includes(null)))) return fail(res, 400, 'Descrizione, importo, costi, decorrenza, durata e filiali devono essere validi.');
+  if (!description || !startsOn || !/^\d{4}-\d{2}-\d{2}$/.test(startsOn) || !Number.isFinite(monthlyAmount) || monthlyAmount < 0 || !Number.isInteger(durationMonths) || durationMonths < 1 || durationMonths > 600 || (req.body?.license_order_id && !licenseOrderId) || (!applyToAll && (!branchIds.length || branchIds.includes(null)))) return fail(res, 400, 'Descrizione, importo, decorrenza, durata e filiali devono essere validi.');
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -960,7 +958,7 @@ app.post('/global-monthly-charges', requireRole('admin'), async (req, res, next)
       const valid = await client.query('SELECT COUNT(*)::int AS count FROM branches WHERE id = ANY($1::bigint[])', [branchIds]);
       if (valid.rows[0].count !== branchIds.length) { await client.query('ROLLBACK'); return fail(res, 400, 'Una o più filiali selezionate non esistono.'); }
     }
-    const created = await client.query('INSERT INTO global_monthly_charges(description, monthly_amount, starts_on, duration_months, apply_to_all, license_order_id, monthly_cost) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *', [description, monthlyAmount, startsOn, durationMonths, applyToAll, licenseOrderId, monthlyCost]);
+    const created = await client.query('INSERT INTO global_monthly_charges(description, monthly_amount, starts_on, duration_months, apply_to_all, license_order_id, monthly_cost) VALUES($1,$2,$3,$4,$5,$6,0) RETURNING *', [description, monthlyAmount, startsOn, durationMonths, applyToAll, licenseOrderId]);
     if (!applyToAll) for (const branchId of branchIds) await client.query('INSERT INTO global_monthly_charge_branches(charge_id, branch_id) VALUES($1,$2)', [created.rows[0].id, branchId]);
     await client.query('COMMIT');
     res.status(201).json({ data: { ...created.rows[0], branch_ids: applyToAll ? [] : branchIds } });
@@ -975,13 +973,12 @@ app.put('/global-monthly-charges/:id', requireRole('admin'), async (req, res, ne
   const durationMonths = Number(req.body?.duration_months ?? 60);
   const applyToAll = req.body?.apply_to_all === true;
   const licenseOrderId = req.body?.license_order_id ? parseId(req.body.license_order_id) : null;
-  const monthlyCost = Number(req.body?.monthly_cost ?? 0);
   const branchIds = Array.isArray(req.body?.branch_ids) ? [...new Set(req.body.branch_ids.map(parseId))] : [];
-  if (!id || !description || !startsOn || !/^\d{4}-\d{2}-\d{2}$/.test(startsOn) || !Number.isFinite(monthlyAmount) || monthlyAmount < 0 || !Number.isFinite(monthlyCost) || monthlyCost < 0 || !Number.isInteger(durationMonths) || durationMonths < 1 || durationMonths > 600 || (req.body?.license_order_id && !licenseOrderId) || (!applyToAll && (!branchIds.length || branchIds.includes(null)))) return fail(res, 400, 'Regola, importo, costi, decorrenza, durata e filiali devono essere validi.');
+  if (!id || !description || !startsOn || !/^\d{4}-\d{2}-\d{2}$/.test(startsOn) || !Number.isFinite(monthlyAmount) || monthlyAmount < 0 || !Number.isInteger(durationMonths) || durationMonths < 1 || durationMonths > 600 || (req.body?.license_order_id && !licenseOrderId) || (!applyToAll && (!branchIds.length || branchIds.includes(null)))) return fail(res, 400, 'Regola, importo, decorrenza, durata e filiali devono essere validi.');
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const updated = await client.query('UPDATE global_monthly_charges SET description=$1, monthly_amount=$2, starts_on=$3, duration_months=$4, apply_to_all=$5, license_order_id=$6, monthly_cost=$7, updated_at=NOW() WHERE id=$8 RETURNING *', [description, monthlyAmount, startsOn, durationMonths, applyToAll, licenseOrderId, monthlyCost, id]);
+    const updated = await client.query('UPDATE global_monthly_charges SET description=$1, monthly_amount=$2, starts_on=$3, duration_months=$4, apply_to_all=$5, license_order_id=$6, monthly_cost=0, updated_at=NOW() WHERE id=$7 RETURNING *', [description, monthlyAmount, startsOn, durationMonths, applyToAll, licenseOrderId, id]);
     if (!updated.rowCount) { await client.query('ROLLBACK'); return fail(res, 404, 'Canone globale non trovato.'); }
     if (!applyToAll) {
       const valid = await client.query('SELECT COUNT(*)::int AS count FROM branches WHERE id = ANY($1::bigint[])', [branchIds]);
@@ -1104,7 +1101,7 @@ app.get('/license-finance', requireRole('admin'), async (_req, res, next) => {
             net_contribution: Number(snapshot.net_contribution)
           };
           monthlyTimeline.push(row);
-          if (Date.parse(month + 'T00:00:00Z') < currentMonth) recovered += row.monthly_revenue;
+          if (Date.parse(month + 'T00:00:00Z') <= currentMonth) recovered += row.monthly_revenue;
           projectedNetRevenue += row.monthly_revenue;
           if (!breakEvenDate && investment > 0 && projectedNetRevenue >= investment) breakEvenDate = monthDate(m + 1);
         }
@@ -1208,8 +1205,7 @@ app.get('/finance/dashboard',async(req,res,next)=>{
   LEFT JOIN branch_counts bc ON bc.month_start=m.month_start
  ), charge_totals AS (
   SELECT COALESCE(SUM(monthly_amount*branch_count),0)::numeric AS global_charges_all_time,
-   COALESCE(SUM(monthly_amount*branch_count) FILTER(WHERE month_start=date_trunc('month',CURRENT_DATE)::date),0)::numeric AS global_charges_current_month,
-   COALESCE(SUM(monthly_cost*branch_count),0)::numeric AS global_charge_costs_all_time
+   COALESCE(SUM(monthly_amount*branch_count) FILTER(WHERE month_start=date_trunc('month',CURRENT_DATE)::date),0)::numeric AS global_charges_current_month
   FROM charge_month_rows
  )
  SELECT (SELECT COUNT(*)::int FROM devices d WHERE ($1::bigint IS NULL OR d.branch_id=$1)) AS devices,
@@ -1219,12 +1215,12 @@ app.get('/finance/dashboard',async(req,res,next)=>{
  (SELECT COUNT(*)::int FROM devices d WHERE d.ownership_type='sale' AND ($1::bigint IS NULL OR d.branch_id=$1)) AS owned_devices,
  (totals.nol_current_month+charge_totals.global_charges_current_month)::numeric AS nol_current_month,
  (totals.nol_all_time+charge_totals.global_charges_all_time)::numeric AS nol_all_time,
- (totals.nol_balance+charge_totals.global_charges_all_time-charge_totals.global_charge_costs_all_time)::numeric AS nol_balance,
+ (totals.nol_balance+charge_totals.global_charges_all_time)::numeric AS nol_balance,
  sales.sales_current_month,sales.sales_all_time,
  costs.hardware_costs,costs.license_costs,costs.other_costs,
- (costs.hardware_costs+costs.license_costs+costs.other_costs+charge_totals.global_charge_costs_all_time)::numeric AS total_costs,
+ (costs.hardware_costs+costs.license_costs+costs.other_costs)::numeric AS total_costs,
  charge_totals.global_charges_current_month,charge_totals.global_charges_all_time,
- (totals.nol_all_time+sales.sales_all_time+charge_totals.global_charges_all_time-costs.hardware_costs-costs.license_costs-costs.other_costs-charge_totals.global_charge_costs_all_time)::numeric AS overall_margin
+ (totals.nol_all_time+sales.sales_all_time+charge_totals.global_charges_all_time-costs.hardware_costs-costs.license_costs-costs.other_costs)::numeric AS overall_margin
  FROM totals CROSS JOIN sales CROSS JOIN costs CROSS JOIN charge_totals
  `,[filter.id]);res.json({data:result.rows[0]});
  }catch(error){next(error);}
