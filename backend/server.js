@@ -320,12 +320,15 @@ app.post('/branches', requireRole('admin', 'technician'), async (req, res, next)
   const network = cleanString(req.body?.network, 100);
   const prefix = cleanString(req.body?.phone_prefix, 30);
   const wlc = cleanString(req.body?.wlc, 200);
+  const isActive = req.body?.is_active;
+  const activeSince = req.body?.active_since;
+  if (typeof isActive !== 'boolean' || !activeSince) return fail(res, 400, 'Stato filiale e data di decorrenza sono obbligatori.');
   if (!companyId || [country, street, nomenclature, previous, network, prefix, wlc].includes(undefined)) return fail(res, 400, 'Verificare i campi della filiale.');
   if (!country || !street) return fail(res, 400, 'Paese e via sono obbligatori.');
   try {
     const result = await pool.query(
-      'INSERT INTO branches(company_id, country, street, nomenclature, previous_nomenclature, network, phone_prefix, wlc) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *',
-      [companyId, country, street, nomenclature, previous, network, prefix, wlc]
+      'INSERT INTO branches(company_id, country, street, nomenclature, previous_nomenclature, network, phone_prefix, wlc, is_active, active_since) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *',
+      [companyId, country, street, nomenclature, previous, network, prefix, wlc, isActive, activeSince]
     );
     res.status(201).json({ data: result.rows[0] });
   } catch (error) { if (error.code === '23503') return fail(res, 400, 'Ragione sociale inesistente.'); next(error); }
@@ -344,14 +347,15 @@ app.get('/branches/:id', async (req, res, next) => {
 app.put('/branches/:id', requireRole('admin', 'technician'), async (req, res, next) => {
   const id = parseId(req.params.id);
   if (!id) return fail(res, 400, 'ID non valido.');
-  const fields = ['company_id', 'country', 'street', 'nomenclature', 'previous_nomenclature', 'network', 'phone_prefix', 'wlc', 'status'];
-  const limits = { country: 100, street: 300, nomenclature: 100, previous_nomenclature: 100, network: 100, phone_prefix: 30, wlc: 200, status: 30 };
+  const fields = ['company_id', 'country', 'street', 'nomenclature', 'previous_nomenclature', 'network', 'phone_prefix', 'wlc', 'status', 'is_active', 'active_since'];
+  const limits = { country: 100, street: 300, nomenclature: 100, previous_nomenclature: 100, network: 100, phone_prefix: 30, wlc: 200, status: 30, active_since: 10 };
   const updates = [];
   const values = [];
   for (const field of fields) {
     if (!Object.hasOwn(req.body || {}, field)) continue;
     let value = req.body[field];
     if (field === 'company_id') value = parseId(value);
+    else if (field === 'is_active') { if (typeof value !== 'boolean') return fail(res, 400, 'Stato filiale non valido.'); }
     else value = cleanString(value, limits[field] || 100);
     if (value === undefined || (field === 'company_id' && !value)) return fail(res, 400, 'Campo non valido: ' + field);
     values.push(value);
@@ -362,13 +366,16 @@ app.put('/branches/:id', requireRole('admin', 'technician'), async (req, res, ne
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const before = await client.query('SELECT b.company_id, c.legal_name AS company_name FROM branches b JOIN companies c ON c.id = b.company_id WHERE b.id = $1 FOR UPDATE OF b', [id]);
+    const before = await client.query('SELECT b.company_id, b.is_active, b.active_since, c.legal_name AS company_name FROM branches b JOIN companies c ON c.id = b.company_id WHERE b.id = $1 FOR UPDATE OF b', [id]);
     if (!before.rowCount) { await client.query('ROLLBACK'); return fail(res, 404, 'Filiale non trovata.'); }
     const oldCompanyId = String(before.rows[0].company_id);
     const oldCompanyName = before.rows[0].company_name;
     const result = await client.query('UPDATE branches SET ' + updates.join(', ') + ', updated_at = NOW() WHERE id = $' + values.length + ' RETURNING *', values);
     if (!result.rowCount) { await client.query('ROLLBACK'); return fail(res, 404, 'Filiale non trovata.'); }
     const newCompanyId = String(result.rows[0].company_id);
+    if (before.rows[0].is_active !== result.rows[0].is_active || String(before.rows[0].active_since).slice(0,10) !== String(result.rows[0].active_since).slice(0,10)) {
+      await client.query('INSERT INTO branch_active_history(branch_id, is_active, active_since) VALUES ($1,$2,$3)', [id, result.rows[0].is_active, result.rows[0].active_since]);
+    }
     if (oldCompanyId !== newCompanyId) {
       const after = await client.query('SELECT legal_name FROM companies WHERE id = $1', [newCompanyId]);
       if (!after.rowCount) { await client.query('ROLLBACK'); return fail(res, 400, 'Ragione sociale inesistente.'); }
@@ -693,6 +700,19 @@ app.put('/stock/locations/:id', requireRole('admin', 'warehouse'), async (req, r
   }
 });
 
+async function syncLicenseOrderCharge(db, order) {
+  const startsOn = order.ea_starts_on || '2026-10-01';
+  const start = new Date(String(startsOn).slice(0,10) + 'T00:00:00Z');
+  const end = order.renewal_on ? new Date(String(order.renewal_on).slice(0,10) + 'T00:00:00Z') : null;
+  const durationMonths = end && end >= start ? Math.max(1, (end.getUTCFullYear()-start.getUTCFullYear())*12 + end.getUTCMonth()-start.getUTCMonth()) : 60;
+  await db.query(`INSERT INTO global_monthly_charges(description, monthly_amount, starts_on, duration_months, apply_to_all, license_order_id, monthly_cost)
+    VALUES ($1,$2,$3,$4,TRUE,$5,$6)
+    ON CONFLICT (license_order_id) WHERE license_order_id IS NOT NULL
+    DO UPDATE SET description=EXCLUDED.description, monthly_amount=EXCLUDED.monthly_amount, starts_on=EXCLUDED.starts_on,
+      duration_months=EXCLUDED.duration_months, apply_to_all=TRUE, monthly_cost=EXCLUDED.monthly_cost`,
+    ['EA · ' + order.license_name, Number(order.ea_monthly_revenue || 0), startsOn, durationMonths, order.id, Number(order.ea_monthly_cost || 0)]);
+}
+
 app.get('/license-purchase-orders', requireRole('admin'), async (_req, res, next) => {
   try {
     const result = await pool.query('SELECT * FROM license_purchase_orders ORDER BY purchased_on DESC NULLS LAST, created_at DESC');
@@ -706,16 +726,20 @@ app.post('/license-purchase-orders', requireRole('admin'), async (req, res, next
   const reference = cleanString(req.body?.reference, 200);
   const purchasedOn = req.body?.purchased_on || null;
   const renewalOn = req.body?.renewal_on || null;
+  const eaMonthlyRevenue = Number(req.body?.ea_monthly_revenue ?? 0);
+  const eaMonthlyCost = Number(req.body?.ea_monthly_cost ?? 0);
+  const eaStartsOn = req.body?.ea_starts_on || '2026-10-01';
   const quantity = Number(req.body?.quantity ?? 1);
   const unitCost = req.body?.unit_cost === '' || req.body?.unit_cost === undefined ? null : Number(req.body.unit_cost);
   const notes = cleanString(req.body?.notes, 10000);
-  if (!licenseName || [licenseName, supplier, reference, notes].includes(undefined) || !Number.isInteger(quantity) || quantity < 1 || quantity > 100000) return fail(res, 400, 'Licenza, quantità o campi non validi.');
+  if (!licenseName || !Number.isFinite(eaMonthlyRevenue) || eaMonthlyRevenue < 0 || !Number.isFinite(eaMonthlyCost) || eaMonthlyCost < 0 || [licenseName, supplier, reference, notes].includes(undefined) || !Number.isInteger(quantity) || quantity < 1 || quantity > 100000) return fail(res, 400, 'Licenza, quantità o campi non validi.');
   if (unitCost !== null && (!Number.isFinite(unitCost) || unitCost < 0)) return fail(res, 400, 'Il costo unitario deve essere valido e non negativo.');
   try {
     const result = await pool.query(
-      'INSERT INTO license_purchase_orders(license_name, supplier, reference, purchased_on, quantity, unit_cost, renewal_on, notes) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *',
-      [licenseName, supplier, reference, purchasedOn, quantity, unitCost, renewalOn, notes]
+      'INSERT INTO license_purchase_orders(license_name, supplier, reference, purchased_on, quantity, unit_cost, renewal_on, notes, ea_monthly_revenue, ea_monthly_cost, ea_starts_on) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *',
+      [licenseName, supplier, reference, purchasedOn, quantity, unitCost, renewalOn, notes, eaMonthlyRevenue, eaMonthlyCost, eaStartsOn]
     );
+    await syncLicenseOrderCharge(pool, result.rows[0]);
     res.status(201).json({ data: result.rows[0] });
   } catch (error) { next(error); }
 });
@@ -727,6 +751,9 @@ app.put('/license-purchase-orders/:id', requireRole('admin'), async (req, res, n
   const reference = cleanString(req.body?.reference, 200);
   const purchasedOn = req.body?.purchased_on || null;
   const renewalOn = req.body?.renewal_on || null;
+  const eaMonthlyRevenue = Number(req.body?.ea_monthly_revenue ?? 0);
+  const eaMonthlyCost = Number(req.body?.ea_monthly_cost ?? 0);
+  const eaStartsOn = req.body?.ea_starts_on || '2026-10-01';
   const quantity = Number(req.body?.quantity);
   const unitCost = req.body?.unit_cost === '' || req.body?.unit_cost === undefined ? null : Number(req.body.unit_cost);
   const notes = cleanString(req.body?.notes, 10000);
@@ -734,10 +761,11 @@ app.put('/license-purchase-orders/:id', requireRole('admin'), async (req, res, n
   if (unitCost !== null && (!Number.isFinite(unitCost) || unitCost < 0)) return fail(res, 400, 'Il costo unitario deve essere valido e non negativo.');
   try {
     const result = await pool.query(
-      'UPDATE license_purchase_orders SET license_name=$1, supplier=$2, reference=$3, purchased_on=$4, quantity=$5, unit_cost=$6, renewal_on=$7, notes=$8, updated_at=NOW() WHERE id=$9 RETURNING *',
-      [licenseName, supplier, reference, purchasedOn, quantity, unitCost, renewalOn, notes, id]
+      'UPDATE license_purchase_orders SET license_name=$1, supplier=$2, reference=$3, purchased_on=$4, quantity=$5, unit_cost=$6, renewal_on=$7, notes=$8, ea_monthly_revenue=$9, ea_monthly_cost=$10, ea_starts_on=$11, updated_at=NOW() WHERE id=$12 RETURNING *',
+      [licenseName, supplier, reference, purchasedOn, quantity, unitCost, renewalOn, notes, eaMonthlyRevenue, eaMonthlyCost, eaStartsOn, id]
     );
     if (!result.rowCount) return fail(res, 404, 'Ordine licenze non trovato.');
+    await syncLicenseOrderCharge(pool, result.rows[0]);
     res.json({ data: result.rows[0] });
   } catch (error) { next(error); }
 });
