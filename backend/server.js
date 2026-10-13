@@ -330,6 +330,7 @@ app.post('/branches', requireRole('admin', 'technician'), async (req, res, next)
       'INSERT INTO branches(company_id, country, street, nomenclature, previous_nomenclature, network, phone_prefix, wlc, is_active, active_since) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *',
       [companyId, country, street, nomenclature, previous, network, prefix, wlc, isActive, activeSince]
     );
+    await pool.query('INSERT INTO branch_active_history(branch_id, is_active, active_since) VALUES ($1,$2,$3)', [result.rows[0].id, isActive, activeSince]);
     res.status(201).json({ data: result.rows[0] });
   } catch (error) { if (error.code === '23503') return fail(res, 400, 'Ragione sociale inesistente.'); next(error); }
 });
@@ -1071,7 +1072,7 @@ app.get('/finance/dashboard',async(req,res,next)=>{
  (SELECT COALESCE(SUM(d.monthly_fee),0)::numeric FROM devices d WHERE d.ownership_type='rental' AND d.status<>'decommissioned' AND ($1::bigint IS NULL OR d.branch_id=$1)) AS monthly_fees,
  (SELECT COUNT(*)::int FROM devices d WHERE d.ownership_type='rental' AND ($1::bigint IS NULL OR d.branch_id=$1)) AS rental_devices,
  (SELECT COUNT(*)::int FROM devices d WHERE d.ownership_type='sale' AND ($1::bigint IS NULL OR d.branch_id=$1)) AS owned_devices,
- totals.nol_current_month,totals.nol_all_time,totals.nol_balance,sales.sales_current_month,sales.sales_all_time,
+ (totals.nol_current_month+charge_totals.global_charges_current_month)::numeric AS nol_current_month,(totals.nol_all_time+charge_totals.global_charges_all_time)::numeric AS nol_all_time,(totals.nol_balance+charge_totals.global_charges_all_time-charge_totals.global_charge_costs_all_time)::numeric AS nol_balance,sales.sales_current_month,sales.sales_all_time,
  costs.hardware_costs,costs.license_costs,costs.other_costs,(costs.hardware_costs+costs.license_costs+costs.other_costs+charge_totals.global_charge_costs_all_time)::numeric AS total_costs,
  charge_totals.global_charges_current_month,charge_totals.global_charges_all_time,
  (totals.nol_all_time+sales.sales_all_time+charge_totals.global_charges_all_time-costs.hardware_costs-costs.license_costs-costs.other_costs-charge_totals.global_charge_costs_all_time)::numeric AS overall_margin
