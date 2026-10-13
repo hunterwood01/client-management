@@ -207,6 +207,8 @@ export default function App() {
   const [purchaseProfileTab, setPurchaseProfileTab] = useState('details');
   const [purchaseOrderType, setPurchaseOrderType] = useState('hardware');
   const [licenseOrders, setLicenseOrders] = useState([]);
+  const [globalCharges, setGlobalCharges] = useState([]);
+  const [globalChargeForm, setGlobalChargeForm] = useState({ description: '', monthly_amount: '', starts_on: new Date().getFullYear() + '-10-01', duration_months: '60', apply_to_all: false, branch_ids: [] });
   const [licenseOrderForm, setLicenseOrderForm] = useState({ license_name: '', supplier: '', reference: '', purchased_on: '', quantity: '1', unit_cost: '', renewal_on: '', notes: '' });
   const [deviceForm, setDeviceForm] = useState({ model_id: '', purchase_profile_id: '', branch_id: '', stock_location_id: '', serial_number: '', status: 'in_stock', ownership_type: 'sale', purchase_cost: '', sale_price: '', monthly_fee: '', activated_on: new Date().toISOString().slice(0,10), notes: '' });
   const [userForm, setUserForm] = useState({ username: '', display_name: '', password: '', role: 'technician' });
@@ -243,9 +245,10 @@ export default function App() {
       setModels(results[3].data); setPurchaseProfiles(results[4].data); setLocations(results[5].data); setMovements(results[6].data); setProductStock(results[7].data);
       setDashboard(results[8].data); setFinance(results[9].data);
       if (user.role === 'admin') {
-        const [userResult, licenseResult] = await Promise.all([api('/admin/users'), api('/license-purchase-orders')]);
+        const [userResult, licenseResult, globalChargeResult] = await Promise.all([api('/admin/users'), api('/license-purchase-orders'), api('/global-monthly-charges')]);
         setUsers(userResult.data);
         setLicenseOrders(licenseResult.data);
+        setGlobalCharges(globalChargeResult.data);
       }
     } catch (err) { setError(err.message); }
   }, [user, branchFilter]);
