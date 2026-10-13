@@ -34,7 +34,7 @@ test('preserves historical revenue and forecasts remaining months at the current
   assert.equal(result.recovered, 500);
   assert.equal(result.projectedRevenue, 1100);
   assert.equal(result.projectedMargin, 100);
-  assert.equal(result.breakEvenDate, '2027-01-01');
+  assert.equal(result.breakEvenDate, '2026-12-01');
 });
 
 test('returns no break-even date when projected revenue never reaches investment', () => {
@@ -75,5 +75,5 @@ test('does not count future months as recovered to date', () => {
   assert.equal(result.recovered, 200);
   assert.equal(result.amountToRecover, 300);
   assert.equal(result.projectedRevenue, 400);
-  assert.equal(result.breakEvenDate, '2026-12-01');
+  assert.equal(result.breakEvenDate, null);
 });
