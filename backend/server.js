@@ -958,77 +958,92 @@ app.delete('/global-monthly-charges/:id', requireRole('admin'), async (req, res,
 });
 app.get('/license-finance', requireRole('admin'), async (_req, res, next) => {
   try {
-    const result = await pool.query(`
-      SELECT l.*,
-        COALESCE(
-          json_agg(json_build_object(
-            'id', g.id,
-            'description', g.description,
-            'monthly_amount', g.monthly_amount,
-            'monthly_cost', g.monthly_cost,
-            'starts_on', g.starts_on,
-            'duration_months', g.duration_months,
-            'apply_to_all', g.apply_to_all,
-            'branch_count', CASE WHEN g.apply_to_all
-              THEN (SELECT COUNT(*) FROM branches)
-              ELSE (SELECT COUNT(*) FROM global_monthly_charge_branches gb WHERE gb.charge_id = g.id)
-            END
-          )) FILTER (WHERE g.id IS NOT NULL), '[]'::json
-        ) AS global_charges
-      FROM license_purchase_orders l
-      LEFT JOIN global_monthly_charges g ON g.license_order_id = l.id
-      GROUP BY l.id
-      ORDER BY l.purchased_on DESC NULLS LAST, l.created_at DESC
-    `);
-    const today = new Date().toISOString().slice(0, 10);
+    // Finance is derived from the license order itself and the branch activation history.
+    // Do not depend on a separately-created global charge to calculate EA recovery.
+    const [ordersResult, branchesResult] = await Promise.all([
+      pool.query('SELECT * FROM license_purchase_orders ORDER BY purchased_on DESC NULLS LAST, created_at DESC'),
+      pool.query(`
+        SELECT b.id, b.is_active, b.active_since,
+          COALESCE(json_agg(json_build_object(
+            'is_active', h.is_active, 'active_since', h.active_since,
+            'recorded_at', h.recorded_at, 'id', h.id
+          ) ORDER BY h.active_since, h.recorded_at, h.id)
+          FILTER (WHERE h.id IS NOT NULL), '[]'::json) AS history
+        FROM branches b
+        LEFT JOIN branch_active_history h ON h.branch_id = b.id
+        GROUP BY b.id
+      `)
+    ]);
+    const today = new Date();
+    const currentMonth = today.getUTCFullYear() * 12 + today.getUTCMonth();
     const monthIndex = (value) => {
+      if (!value) return null;
       const d = new Date(String(value).slice(0, 10) + 'T00:00:00Z');
       return d.getUTCFullYear() * 12 + d.getUTCMonth();
     };
-    const addMonths = (value, count) => {
-      const d = new Date(String(value).slice(0, 10) + 'T00:00:00Z');
-      d.setUTCDate(1);
-      d.setUTCMonth(d.getUTCMonth() + count);
-      return d.toISOString().slice(0, 10);
+    const monthDate = (index) => {
+      const year = Math.floor(index / 12);
+      const month = index % 12;
+      return new Date(Date.UTC(year, month, 1)).toISOString().slice(0, 10);
     };
-    const data = result.rows.map((order) => {
+    const branchHistory = branchesResult.rows.map((branch) => ({
+      active_since: String(branch.active_since).slice(0, 10),
+      is_active: branch.is_active,
+      history: (branch.history || []).map((item) => ({
+        ...item, active_since: String(item.active_since).slice(0, 10)
+      }))
+    }));
+    const activeBranchesAt = (month) => {
+      const date = monthDate(month);
+      return branchHistory.reduce((count, branch) => {
+        const events = branch.history.filter((event) => event.active_since <= date);
+        let active;
+        if (events.length) active = events[events.length - 1].is_active;
+        else active = Boolean(branch.is_active) && branch.active_since <= date;
+        return count + (active ? 1 : 0);
+      }, 0);
+    };
+    const data = ordersResult.rows.map((order) => {
       const investment = Number(order.unit_cost || 0) * Number(order.quantity || 1);
-      const start = order.purchased_on ? String(order.purchased_on).slice(0, 10) : null;
-      const end = order.renewal_on ? String(order.renewal_on).slice(0, 10) : null;
-      const charges = (order.global_charges || []).map((charge) => ({
-        ...charge,
-        monthly_amount: Number(charge.monthly_amount || 0),
-        monthly_cost: Number(charge.monthly_cost || 0),
-        branch_count: Number(charge.branch_count || 0),
-        net_monthly: (Number(charge.monthly_amount || 0) - Number(charge.monthly_cost || 0)) * Number(charge.branch_count || 0),
-        charge_start_month: monthIndex(charge.starts_on),
-        charge_end_month: monthIndex(charge.starts_on) + Number(charge.duration_months || 0)
-      }));
+      const start = monthIndex(order.ea_starts_on || '2026-10-01');
+      const end = monthIndex(order.renewal_on);
+      const validTerm = start !== null && end !== null && end > start;
       let recovered = 0;
       let projectedNetRevenue = 0;
       let breakEvenDate = null;
-      if (start && end && monthIndex(end) >= monthIndex(start)) {
-        const first = monthIndex(start);
-        const last = monthIndex(end);
-        for (let m = first; m < last; m++) {
-          const netForMonth = charges.reduce((sum, charge) => m >= charge.charge_start_month && m < charge.charge_end_month ? sum + charge.net_monthly : sum, 0);
-          projectedNetRevenue += netForMonth;
-          if (m < monthIndex(today)) recovered += netForMonth;
-          if (!breakEvenDate && investment > 0 && projectedNetRevenue >= investment) breakEvenDate = addMonths(start, m - first + 1);
+      const monthlyTimeline = [];
+      if (validTerm) {
+        for (let m = start; m < end; m++) {
+          const activeBranches = activeBranchesAt(m);
+          const gross = Number(order.ea_monthly_revenue || 0) * activeBranches;
+          const recurringCost = Number(order.ea_monthly_cost || 0) * activeBranches;
+          const net = gross - recurringCost;
+          projectedNetRevenue += net;
+          if (m < currentMonth) recovered += net;
+          if (!breakEvenDate && investment > 0 && projectedNetRevenue >= investment) {
+            breakEvenDate = monthDate(m + 1);
+          }
+          monthlyTimeline.push({
+            month: monthDate(m), active_branches: activeBranches,
+            monthly_revenue: gross, monthly_cost: recurringCost, net_contribution: net
+          });
         }
       }
-      const termComplete = Boolean(start && end && monthIndex(end) > monthIndex(start));
+      const termComplete = validTerm;
       return {
         ...order,
         investment_cost: investment,
+        active_branches_now: activeBranchesAt(currentMonth),
+        monthly_revenue_now: Number(order.ea_monthly_revenue || 0) * activeBranchesAt(currentMonth),
+        monthly_cost_now: Number(order.ea_monthly_cost || 0) * activeBranchesAt(currentMonth),
         recovered_to_date: termComplete ? recovered : null,
         amount_to_recover: termComplete ? Math.max(0, investment - recovered) : null,
-        recovery_percent: termComplete && investment > 0 ? Math.min(100, recovered / investment * 100) : null,
+        recovery_percent: termComplete && investment > 0 ? Math.max(0, Math.min(100, recovered / investment * 100)) : null,
         projected_net_revenue: termComplete ? projectedNetRevenue : null,
         projected_margin: termComplete ? projectedNetRevenue - investment : null,
         break_even_date: termComplete ? breakEvenDate : null,
         term_complete: termComplete,
-        global_charges: charges
+        monthly_timeline: monthlyTimeline
       };
     });
     res.json({ data });
