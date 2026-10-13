@@ -464,7 +464,8 @@ app.put('/purchase-profiles/:id', requireRole('admin'), async (req, res, next) =
   const unitCost = req.body?.unit_cost === '' || req.body?.unit_cost === undefined ? null : Number(req.body.unit_cost);
   const quantity = Number(req.body?.quantity);
   const notes = cleanString(req.body?.notes, 10000);
-  if (!id || [supplier, reference, notes].includes(undefined) || !Number.isInteger(quantity) || quantity < 1 || quantity > 100000) return fail(res, 400, 'Ordine, quantità o campi non validi.');
+  const stockLocationId = req.body?.stock_location_id === null || req.body?.stock_location_id === '' ? null : parseId(req.body?.stock_location_id);
+  if (!id || [supplier, reference, notes].includes(undefined) || (req.body?.stock_location_id && !stockLocationId) || !Number.isInteger(quantity) || quantity < 1 || quantity > 100000) return fail(res, 400, 'Ordine, quantità o campi non validi.');
   if (unitCost !== null && (!Number.isFinite(unitCost) || unitCost < 0)) return fail(res, 400, 'Il costo unitario deve essere un importo valido e non negativo.');
   const client = await pool.connect();
   try {
@@ -478,8 +479,41 @@ app.put('/purchase-profiles/:id', requireRole('admin'), async (req, res, next) =
       await client.query('ROLLBACK');
       return fail(res, 409, 'La quantità non può essere inferiore ai device già prelevati da questo ordine (' + consumedCount + ').');
     }
+    const newLocationId = stockLocationId;
     const delta = quantity - Number(order.quantity || 1);
-    if (delta !== 0 && order.stock_location_id) {
+    const locationChanged = String(order.stock_location_id || '') !== String(newLocationId || '');
+    if (locationChanged) {
+      const remainingForOrder = Math.max(0, quantity - consumedCount);
+      let transferable = 0;
+      if (order.stock_location_id) {
+        const oldStock = await client.query(
+          'SELECT quantity FROM product_stock WHERE device_model_id = $1 AND stock_location_id = $2 FOR UPDATE',
+          [order.device_model_id, order.stock_location_id]
+        );
+        transferable = Math.min(remainingForOrder, Number(oldStock.rows[0]?.quantity || 0));
+        if (transferable > 0) {
+          await client.query(
+            'UPDATE product_stock SET quantity = quantity - $1, updated_at = NOW() WHERE device_model_id = $2 AND stock_location_id = $3',
+            [transferable, order.device_model_id, order.stock_location_id]
+          );
+          await client.query(
+            "INSERT INTO product_stock_movements(device_model_id, stock_location_id, quantity_delta, movement_type, purchase_profile_id, notes, moved_by) VALUES ($1,$2,$3,'adjustment',$4,$5,$6)",
+            [order.device_model_id, order.stock_location_id, -transferable, id, 'Spostamento carico ordine ' + (reference || order.reference || id), req.user.id]
+          );
+        }
+      }
+      const quantityToMove = order.stock_location_id ? transferable : remainingForOrder;
+      if (newLocationId && quantityToMove > 0) {
+        await client.query(
+          'INSERT INTO product_stock(device_model_id, stock_location_id, quantity) VALUES ($1,$2,$3) ON CONFLICT(device_model_id, stock_location_id) DO UPDATE SET quantity = product_stock.quantity + EXCLUDED.quantity, updated_at = NOW()',
+          [order.device_model_id, newLocationId, quantityToMove]
+        );
+        await client.query(
+          "INSERT INTO product_stock_movements(device_model_id, stock_location_id, quantity_delta, movement_type, purchase_profile_id, notes, moved_by) VALUES ($1,$2,$3,'adjustment',$4,$5,$6)",
+          [order.device_model_id, newLocationId, quantityToMove, id, 'Riassegnazione ordine ' + (reference || order.reference || id), req.user.id]
+        );
+      }
+    } else if (delta !== 0 && order.stock_location_id) {
       if (delta > 0) {
         await client.query('INSERT INTO product_stock(device_model_id, stock_location_id, quantity) VALUES ($1,$2,$3) ON CONFLICT(device_model_id, stock_location_id) DO UPDATE SET quantity = product_stock.quantity + EXCLUDED.quantity, updated_at = NOW()', [order.device_model_id, order.stock_location_id, delta]);
       } else {
@@ -491,7 +525,7 @@ app.put('/purchase-profiles/:id', requireRole('admin'), async (req, res, next) =
       }
       await client.query("INSERT INTO product_stock_movements(device_model_id, stock_location_id, quantity_delta, movement_type, purchase_profile_id, notes, moved_by) VALUES ($1,$2,$3,'adjustment',$4,$5,$6)", [order.device_model_id, order.stock_location_id, delta, id, 'Modifica quantità ordine ' + (reference || order.reference || id), req.user.id]);
     }
-    const result = await client.query('UPDATE purchase_profiles SET supplier = $1, reference = $2, purchased_on = $3, unit_cost = $4, quantity = $5, notes = $6 WHERE id = $7 RETURNING *', [supplier, reference, purchasedOn, unitCost, quantity, notes, id]);
+    const result = await client.query('UPDATE purchase_profiles SET supplier = $1, reference = $2, purchased_on = $3, unit_cost = $4, quantity = $5, stock_location_id = $6, notes = $7 WHERE id = $8 RETURNING *', [supplier, reference, purchasedOn, unitCost, quantity, newLocationId, notes, id]);
     await client.query('COMMIT');
     res.json({ data: result.rows[0] });
   } catch (error) {
@@ -513,27 +547,34 @@ app.delete('/purchase-profiles/:id', requireRole('admin'), async (req, res, next
       return fail(res, 404, 'Ordine non trovato.');
     }
     const order = found.rows[0];
-    const linkedDevices = await client.query('SELECT COUNT(*)::int AS count FROM devices WHERE purchase_profile_id = $1', [id]);
+    const linkedDevices = await client.query(
+      "SELECT COUNT(*)::int AS count FROM devices WHERE purchase_profile_id = $1 AND (branch_id IS NOT NULL OR stock_consumed = TRUE OR status NOT IN ('in_stock','to_activate'))",
+      [id]
+    );
     if (linkedDevices.rows[0].count > 0) {
       await client.query('ROLLBACK');
-      return fail(res, 409, 'Impossibile eliminare l’ordine: ci sono device collegati. Rimuovi o ricollega prima i device.');
+      return fail(res, 409, 'Impossibile eliminare l’ordine: almeno un device collegato è assegnato o ha già avuto movimenti di utilizzo.');
     }
+    await client.query('UPDATE devices SET purchase_profile_id = NULL WHERE purchase_profile_id = $1', [id]);
     if (order.stock_location_id && Number(order.quantity || 0) > 0) {
-      const stock = await client.query(
-        'UPDATE product_stock SET quantity = quantity - $1, updated_at = NOW() WHERE device_model_id = $2 AND stock_location_id = $3 AND quantity >= $1 RETURNING quantity',
-        [Number(order.quantity), order.device_model_id, order.stock_location_id]
+      const currentStock = await client.query(
+        'SELECT quantity FROM product_stock WHERE device_model_id = $1 AND stock_location_id = $2 FOR UPDATE',
+        [order.device_model_id, order.stock_location_id]
       );
-      if (!stock.rowCount) {
-        await client.query('ROLLBACK');
-        return fail(res, 409, 'Impossibile eliminare l’ordine: la giacenza disponibile non è sufficiente per stornare il carico.');
+      const availableToReverse = Math.min(Number(order.quantity), Number(currentStock.rows[0]?.quantity || 0));
+      if (availableToReverse > 0) {
+        await client.query(
+          'UPDATE product_stock SET quantity = quantity - $1, updated_at = NOW() WHERE device_model_id = $2 AND stock_location_id = $3',
+          [availableToReverse, order.device_model_id, order.stock_location_id]
+        );
+        await client.query(
+          "INSERT INTO product_stock_movements(device_model_id, stock_location_id, quantity_delta, movement_type, notes, moved_by) VALUES ($1,$2,$3,'adjustment',$4,$5)",
+          [order.device_model_id, order.stock_location_id, -availableToReverse, 'Storno giacenza residua ordine eliminato #' + id + (order.reference ? ' · ' + order.reference : ''), req.user.id]
+        );
       }
       await client.query(
         "UPDATE product_stock_movements SET purchase_profile_id = NULL, notes = CONCAT(COALESCE(notes, ''), $1) WHERE purchase_profile_id = $2",
         [' [ordine eliminato #' + id + (order.reference ? ' · ' + order.reference : '') + ']', id]
-      );
-      await client.query(
-        "INSERT INTO product_stock_movements(device_model_id, stock_location_id, quantity_delta, movement_type, notes, moved_by) VALUES ($1,$2,$3,'adjustment',$4,$5)",
-        [order.device_model_id, order.stock_location_id, -Number(order.quantity), 'Storno carico ordine eliminato #' + id + (order.reference ? ' · ' + order.reference : ''), req.user.id]
       );
     } else {
       await client.query(
@@ -650,6 +691,65 @@ app.put('/stock/locations/:id', requireRole('admin', 'warehouse'), async (req, r
     if (error.code === '23505') return fail(res, 409, 'Esiste già un magazzino con questo nome.');
     next(error);
   }
+});
+
+app.get('/license-purchase-orders', requireRole('admin'), async (_req, res, next) => {
+  try {
+    const result = await pool.query('SELECT * FROM license_purchase_orders ORDER BY purchased_on DESC NULLS LAST, created_at DESC');
+    res.json({ data: result.rows });
+  } catch (error) { next(error); }
+});
+
+app.post('/license-purchase-orders', requireRole('admin'), async (req, res, next) => {
+  const licenseName = cleanString(req.body?.license_name, 200);
+  const supplier = cleanString(req.body?.supplier, 200);
+  const reference = cleanString(req.body?.reference, 200);
+  const purchasedOn = req.body?.purchased_on || null;
+  const renewalOn = req.body?.renewal_on || null;
+  const quantity = Number(req.body?.quantity ?? 1);
+  const unitCost = req.body?.unit_cost === '' || req.body?.unit_cost === undefined ? null : Number(req.body.unit_cost);
+  const notes = cleanString(req.body?.notes, 10000);
+  if (!licenseName || [licenseName, supplier, reference, notes].includes(undefined) || !Number.isInteger(quantity) || quantity < 1 || quantity > 100000) return fail(res, 400, 'Licenza, quantità o campi non validi.');
+  if (unitCost !== null && (!Number.isFinite(unitCost) || unitCost < 0)) return fail(res, 400, 'Il costo unitario deve essere valido e non negativo.');
+  try {
+    const result = await pool.query(
+      'INSERT INTO license_purchase_orders(license_name, supplier, reference, purchased_on, quantity, unit_cost, renewal_on, notes) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *',
+      [licenseName, supplier, reference, purchasedOn, quantity, unitCost, renewalOn, notes]
+    );
+    res.status(201).json({ data: result.rows[0] });
+  } catch (error) { next(error); }
+});
+
+app.put('/license-purchase-orders/:id', requireRole('admin'), async (req, res, next) => {
+  const id = parseId(req.params.id);
+  const licenseName = cleanString(req.body?.license_name, 200);
+  const supplier = cleanString(req.body?.supplier, 200);
+  const reference = cleanString(req.body?.reference, 200);
+  const purchasedOn = req.body?.purchased_on || null;
+  const renewalOn = req.body?.renewal_on || null;
+  const quantity = Number(req.body?.quantity);
+  const unitCost = req.body?.unit_cost === '' || req.body?.unit_cost === undefined ? null : Number(req.body.unit_cost);
+  const notes = cleanString(req.body?.notes, 10000);
+  if (!id || !licenseName || [licenseName, supplier, reference, notes].includes(undefined) || !Number.isInteger(quantity) || quantity < 1 || quantity > 100000) return fail(res, 400, 'Licenza, quantità o campi non validi.');
+  if (unitCost !== null && (!Number.isFinite(unitCost) || unitCost < 0)) return fail(res, 400, 'Il costo unitario deve essere valido e non negativo.');
+  try {
+    const result = await pool.query(
+      'UPDATE license_purchase_orders SET license_name=$1, supplier=$2, reference=$3, purchased_on=$4, quantity=$5, unit_cost=$6, renewal_on=$7, notes=$8, updated_at=NOW() WHERE id=$9 RETURNING *',
+      [licenseName, supplier, reference, purchasedOn, quantity, unitCost, renewalOn, notes, id]
+    );
+    if (!result.rowCount) return fail(res, 404, 'Ordine licenze non trovato.');
+    res.json({ data: result.rows[0] });
+  } catch (error) { next(error); }
+});
+
+app.delete('/license-purchase-orders/:id', requireRole('admin'), async (req, res, next) => {
+  const id = parseId(req.params.id);
+  if (!id) return fail(res, 400, 'ID ordine licenze non valido.');
+  try {
+    const result = await pool.query('DELETE FROM license_purchase_orders WHERE id=$1 RETURNING id', [id]);
+    if (!result.rowCount) return fail(res, 404, 'Ordine licenze non trovato.');
+    res.status(204).end();
+  } catch (error) { next(error); }
 });
 
 app.get('/product-stock',async(_req,res,next)=>{
