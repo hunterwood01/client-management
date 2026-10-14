@@ -360,3 +360,6 @@ tbody tr:hover td { background: color-mix(in srgb, var(--surface-soft) 72%, tran
 .table-sort-button:hover { color: var(--text); }
 .table-sort-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 3px; }
 .table-sort-button span { opacity: .7; font-size: 11px; }
+
+.row-actions { display: inline-flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+.row-actions .row-action { white-space: nowrap; }
