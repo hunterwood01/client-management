@@ -654,6 +654,7 @@ app.get('/devices', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+// Reconcile available stock once when a warehouse-sourced device becomes operational at a branch.
 async function consumeDeviceStock(client, device, branchId, status, userId) {
   if (!branchId || status !== 'operational' || !device.stock_location_id || device.stock_consumed) return false;
   const stock = await client.query(
