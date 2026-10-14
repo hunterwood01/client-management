@@ -701,6 +701,43 @@ app.post('/devices/bulk-status', requireRole('admin', 'technician', 'warehouse')
   } catch (error) { next(error); }
 });
 
+app.post('/devices/bulk-update', requireRole('admin', 'technician', 'warehouse'), async (req, res, next) => {
+  const field = req.body?.field;
+  const rawValue = req.body?.value;
+  const rawBranchIds = Array.isArray(req.body?.branch_ids) ? req.body.branch_ids : [];
+  const branchIds = [...new Set(rawBranchIds.map(parseId))];
+  const allowedFields = ['activated_on', 'status', 'purchase_profile_id', 'stock_location_id'];
+  if (!allowedFields.includes(field)) return fail(res, 400, 'Campo non consentito per la modifica massiva.');
+  if (branchIds.some((id) => !id)) return fail(res, 400, 'Una o più filiali selezionate non sono valide.');
+
+  let value = rawValue;
+  if (field === 'activated_on') {
+    if (value === '' || value === null || value === undefined) value = null;
+    else if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value) || Number.isNaN(Date.parse(value)) || new Date(value).toISOString().slice(0, 10) !== value) {
+      return fail(res, 400, 'La data di attivazione non è valida.');
+    }
+  } else if (field === 'status') {
+    if (!['in_stock', 'to_activate', 'operational', 'fault', 'decommissioned'].includes(value)) return fail(res, 400, 'Stato dispositivo non valido.');
+  } else {
+    value = value === '' || value === null || value === undefined ? null : parseId(value);
+    if (rawValue !== '' && rawValue !== null && rawValue !== undefined && !value) return fail(res, 400, 'Ordine o magazzino non valido.');
+  }
+
+  const assignments = field === 'activated_on'
+    ? 'activated_on = $1, installed_on = $1'
+    : field + ' = $1';
+  const values = [value, branchIds.length ? branchIds : null];
+  const where = 'branch_id IS NOT NULL AND ($2::bigint[] IS NULL OR branch_id = ANY($2::bigint[]))';
+
+  try {
+    const result = await pool.query('UPDATE devices SET ' + assignments + ', updated_at = NOW() WHERE ' + where + ' RETURNING id', values);
+    res.json({ updated_count: result.rowCount });
+  } catch (error) {
+    if (error.code === '23503') return fail(res, 400, 'Ordine di provenienza o magazzino non valido.');
+    next(error);
+  }
+});
+
 app.put('/devices/:id', requireRole('admin', 'technician', 'warehouse'), async (req, res, next) => {
   const id = parseId(req.params.id);
   if (!id) return fail(res, 400, 'ID non valido.');
