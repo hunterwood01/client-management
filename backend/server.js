@@ -661,12 +661,13 @@ app.post('/devices', requireRole('admin', 'technician', 'warehouse'), async (req
   const purchaseProfileId = req.body?.purchase_profile_id ? parseId(req.body.purchase_profile_id) : null;
   const assetTag = cleanString(req.body?.asset_tag, 100);
   const serial = cleanString(req.body?.serial_number, 200);
-  const status = req.body?.status || (branchId ? 'operational' : 'in_stock');
+  const status = req.body?.status || 'to_activate';
   const ownership = req.body?.ownership_type || 'sale';
   const cost = req.body?.purchase_cost ?? null;
   const fee = req.body?.monthly_fee ?? null;
   const purchased = req.body?.purchased_on || null;
-  const installed = req.body?.installed_on || null;
+  const installed = req.body?.installed_on || req.body?.activated_on || null;
+  const activated = req.body?.activated_on || installed;
   const notes = cleanString(req.body?.notes, 10000);
   if (!modelId || [assetTag, serial, notes].includes(undefined)) return fail(res, 400, 'Modello o campi non validi.');
   if (!['to_activate', 'operational', 'fault', 'decommissioned', 'in_stock'].includes(status)) return fail(res, 400, 'Stato dispositivo non valido.');
@@ -674,17 +675,36 @@ app.post('/devices', requireRole('admin', 'technician', 'warehouse'), async (req
   if ((cost !== null && (!Number.isFinite(Number(cost)) || Number(cost) < 0)) || (fee !== null && (!Number.isFinite(Number(fee)) || Number(fee) < 0))) return fail(res, 400, 'Importi non validi.');
   try {
     const result = await pool.query(
-      'INSERT INTO devices(model_id, branch_id, stock_location_id, purchase_profile_id, asset_tag, serial_number, status, ownership_type, purchase_cost, monthly_fee, purchased_on, installed_on, notes) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,CASE WHEN $4::bigint IS NOT NULL THEN (SELECT unit_cost FROM purchase_profiles WHERE id=$4) ELSE $9 END,$10,$11,$12,$13) RETURNING *',
-      [modelId, branchId, stockLocationId, purchaseProfileId, assetTag, serial, status, ownership, cost, fee, purchased, installed, notes]
+      'INSERT INTO devices(model_id, branch_id, stock_location_id, purchase_profile_id, asset_tag, serial_number, status, ownership_type, purchase_cost, monthly_fee, purchased_on, activated_on, installed_on, notes) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,CASE WHEN $4::bigint IS NOT NULL THEN (SELECT unit_cost FROM purchase_profiles WHERE id=$4) ELSE $9 END,$10,$11,$12,$13,$14) RETURNING *',
+      [modelId, branchId, stockLocationId, purchaseProfileId, assetTag, serial, status, ownership, cost, fee, purchased, activated, installed, notes]
     );
     res.status(201).json({ data: result.rows[0] });
   } catch (error) { if (error.code === '23505') return fail(res, 409, 'Asset tag già presente.'); if (error.code === '23503') return fail(res, 400, 'Modello, filiale o magazzino non valido.'); next(error); }
 });
 
+app.post('/devices/bulk-status', requireRole('admin', 'technician', 'warehouse'), async (req, res, next) => {
+  const status = req.body?.status;
+  const rawBranchIds = Array.isArray(req.body?.branch_ids) ? req.body.branch_ids : [];
+  const branchIds = [...new Set(rawBranchIds.map(parseId))];
+  if (status !== 'to_activate') return fail(res, 400, 'Stato massivo non consentito.');
+  if (branchIds.some((id) => !id)) return fail(res, 400, 'Una o più filiali selezionate non sono valide.');
+  try {
+    const result = branchIds.length
+      ? await pool.query(
+        "UPDATE devices SET status = 'to_activate', updated_at = NOW() WHERE status = 'operational' AND branch_id = ANY($1::bigint[]) RETURNING id",
+        [branchIds]
+      )
+      : await pool.query(
+        "UPDATE devices SET status = 'to_activate', updated_at = NOW() WHERE status = 'operational' AND branch_id IS NOT NULL RETURNING id"
+      );
+    res.json({ updated_count: result.rowCount });
+  } catch (error) { next(error); }
+});
+
 app.put('/devices/:id', requireRole('admin', 'technician', 'warehouse'), async (req, res, next) => {
   const id = parseId(req.params.id);
   if (!id) return fail(res, 400, 'ID non valido.');
-  const allowed = ['model_id', 'branch_id', 'stock_location_id', 'purchase_profile_id', 'asset_tag', 'serial_number', 'status', 'ownership_type', 'purchase_cost', 'monthly_fee', 'purchased_on', 'installed_on', 'notes'];
+  const allowed = ['model_id', 'branch_id', 'stock_location_id', 'purchase_profile_id', 'asset_tag', 'serial_number', 'status', 'ownership_type', 'purchase_cost', 'monthly_fee', 'purchased_on', 'activated_on', 'installed_on', 'notes'];
   const limits = { asset_tag: 100, serial_number: 200, status: 30, ownership_type: 20, notes: 10000 };
   const values = [];
   const assignments = [];
@@ -693,7 +713,7 @@ app.put('/devices/:id', requireRole('admin', 'technician', 'warehouse'), async (
     let value = req.body[field];
     if (['model_id', 'branch_id', 'stock_location_id', 'purchase_profile_id'].includes(field)) value = value === null || value === '' ? null : parseId(value);
     else if (['purchase_cost', 'monthly_fee'].includes(field)) value = value === null || value === '' ? null : Number(value);
-    else if (['purchased_on', 'installed_on'].includes(field)) value = value || null;
+    else if (['purchased_on', 'activated_on', 'installed_on'].includes(field)) value = value || null;
     else value = cleanString(value, limits[field] || 200);
     if (value === undefined || (['purchase_cost', 'monthly_fee'].includes(field) && value !== null && (!Number.isFinite(value) || value < 0))) return fail(res, 400, 'Campo non valido: ' + field);
     values.push(value);
