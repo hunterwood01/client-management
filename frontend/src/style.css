@@ -321,3 +321,36 @@ tbody tr:hover td { background: color-mix(in srgb, var(--surface-soft) 72%, tran
 .import-table td { vertical-align: top; }
 .import-warning { display: block; margin-top: 5px; color: #b45309; font-size: 10px; }
 .page-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 8px; }
+
+
+/* Device bulk status controls */
+.bulk-status-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+.bulk-status-controls {
+  display: flex;
+  align-items: flex-end;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+.bulk-status-controls label {
+  display: flex;
+  flex-direction: column;
+  gap: .4rem;
+  min-width: min(100%, 320px);
+  flex: 1;
+}
+.bulk-status-controls select {
+  min-height: 7rem;
+}
+.bulk-status-actions {
+  display: flex;
+  gap: .5rem;
+  flex-wrap: wrap;
+}
+@media (max-width: 640px) {
+  .bulk-status-controls, .bulk-status-actions { width: 100%; }
+  .bulk-status-actions button { flex: 1; }
+}
