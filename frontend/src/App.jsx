@@ -80,7 +80,7 @@ function parseDeviceCsv(text) {
   const headers = parseLine(lines[0]).map((value) => normalizeText(value).replace(/[^a-z0-9]+/g, ' ').trim());
   const index = (...names) => headers.findIndex((header) => names.includes(header));
   const indexes = {
-    serial: index('serial', 'seriale', 'seriale'),
+    serial: index('serial', 'matricola', 'seriale'),
     sku: index('sku', 'codice sku'),
     model: index('model', 'modello', 'dispositivo'),
     brand: index('brand', 'marca', 'manufacturer'),
