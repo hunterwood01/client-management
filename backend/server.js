@@ -301,7 +301,17 @@ app.get('/dashboard', async (req, res, next) => {
 
 app.get('/companies', async (_req, res, next) => {
   try {
-    const result = await pool.query('SELECT c.*, COUNT(b.id)::int AS branch_count FROM companies c LEFT JOIN branches b ON b.company_id = c.id GROUP BY c.id ORDER BY c.legal_name');
+    const result = await pool.query(`
+      SELECT c.*, parent.legal_name AS parent_company_name,
+        COUNT(DISTINCT b.id)::int AS branch_count,
+        COUNT(DISTINCT child.id)::int AS child_company_count
+      FROM companies c
+      LEFT JOIN companies parent ON parent.id = c.parent_company_id
+      LEFT JOIN branches b ON b.company_id = c.id
+      LEFT JOIN companies child ON child.parent_company_id = c.id
+      GROUP BY c.id, parent.legal_name
+      ORDER BY c.legal_name
+    `);
     res.json({ data: result.rows });
   } catch (error) { next(error); }
 });
@@ -309,25 +319,108 @@ app.get('/companies', async (_req, res, next) => {
 app.post('/companies', requireRole('admin'), async (req, res, next) => {
   const legalName = cleanString(req.body?.legal_name, 200);
   const taxCode = cleanString(req.body?.tax_code, 50);
+  const rawParentId = req.body?.parent_company_id;
+  const parentCompanyId = rawParentId === '' || rawParentId === null || rawParentId === undefined ? null : parseId(rawParentId);
   if (legalName === undefined || taxCode === undefined) return fail(res, 400, 'Verificare i campi inseriti.');
   if (!legalName) return fail(res, 400, 'La ragione sociale è obbligatoria.');
+  if (rawParentId !== '' && rawParentId !== null && rawParentId !== undefined && !parentCompanyId) return fail(res, 400, 'Ragione sociale madre non valida.');
   try {
-    const result = await pool.query('INSERT INTO companies(legal_name, tax_code) VALUES ($1, $2) RETURNING *', [legalName, taxCode]);
+    const result = await pool.query(
+      'INSERT INTO companies(legal_name, tax_code, parent_company_id) VALUES ($1, $2, $3) RETURNING *',
+      [legalName, taxCode, parentCompanyId]
+    );
     res.status(201).json({ data: result.rows[0] });
-  } catch (error) { if (error.code === '23505') return fail(res, 409, 'Ragione sociale già presente.'); next(error); }
+  } catch (error) {
+    if (error.code === '23505') return fail(res, 409, 'Ragione sociale già presente.');
+    if (error.code === '23503') return fail(res, 400, 'La ragione sociale madre selezionata non esiste.');
+    next(error);
+  }
 });
 
 app.put('/companies/:id', requireRole('admin'), async (req, res, next) => {
   const id = parseId(req.params.id);
   const legalName = cleanString(req.body?.legal_name, 200);
   const taxCode = cleanString(req.body?.tax_code, 50);
+  const hasParent = Object.hasOwn(req.body || {}, 'parent_company_id');
+  const rawParentId = req.body?.parent_company_id;
+  const parsedParentId = rawParentId === '' || rawParentId === null || rawParentId === undefined ? null : parseId(rawParentId);
+  const hasChildren = Object.hasOwn(req.body || {}, 'child_company_ids');
+  const rawChildIds = req.body?.child_company_ids;
   if (!id) return fail(res, 400, 'ID non valido.');
   if (legalName === undefined || taxCode === undefined || !legalName) return fail(res, 400, 'Ragione sociale non valida.');
+  if (hasParent && rawParentId !== '' && rawParentId !== null && rawParentId !== undefined && !parsedParentId) return fail(res, 400, 'Ragione sociale madre non valida.');
+  if (hasChildren && !Array.isArray(rawChildIds)) return fail(res, 400, 'Elenco delle ragioni sociali figlie non valido.');
+  const childIds = hasChildren ? rawChildIds.map(parseId) : [];
+  if (hasChildren && (childIds.some((childId) => !childId) || new Set(childIds).size !== childIds.length || childIds.includes(id))) {
+    return fail(res, 400, 'Una o più ragioni sociali figlie non sono valide.');
+  }
+  if (hasParent && parsedParentId === id) return fail(res, 409, 'Una ragione sociale non può essere madre di sé stessa.');
+  if (hasParent && parsedParentId && hasChildren && childIds.includes(parsedParentId)) {
+    return fail(res, 409, 'La ragione sociale madre non può essere anche una figlia.');
+  }
+
+  const client = await pool.connect();
   try {
-    const result = await pool.query('UPDATE companies SET legal_name = $1, tax_code = $2, updated_at = NOW() WHERE id = $3 RETURNING *', [legalName, taxCode, id]);
-    if (!result.rowCount) return fail(res, 404, 'Ragione sociale non trovata.');
+    await client.query('BEGIN');
+    const current = await client.query('SELECT id, parent_company_id FROM companies WHERE id = $1 FOR UPDATE', [id]);
+    if (!current.rowCount) { await client.query('ROLLBACK'); return fail(res, 404, 'Ragione sociale non trovata.'); }
+    const parentCompanyId = hasParent ? parsedParentId : current.rows[0].parent_company_id;
+
+    if (parentCompanyId) {
+      const cycle = await client.query(`
+        WITH RECURSIVE descendants(id) AS (
+          SELECT id FROM companies WHERE parent_company_id = $1
+          UNION
+          SELECT c.id FROM companies c JOIN descendants d ON c.parent_company_id = d.id
+        )
+        SELECT 1 FROM descendants WHERE id = $2 LIMIT 1
+      `, [id, parentCompanyId]);
+      if (cycle.rowCount) { await client.query('ROLLBACK'); return fail(res, 409, 'La società madre selezionata creerebbe un ciclo nella gerarchia.'); }
+    }
+
+    if (hasChildren && childIds.length) {
+      const ancestors = await client.query(`
+        WITH RECURSIVE ancestors(id) AS (
+          SELECT parent_company_id FROM companies WHERE id = $1 AND parent_company_id IS NOT NULL
+          UNION
+          SELECT c.parent_company_id FROM companies c JOIN ancestors a ON c.id = a.id WHERE c.parent_company_id IS NOT NULL
+        )
+        SELECT id FROM ancestors
+      `, [id]);
+      const ancestorIds = new Set(ancestors.rows.map((row) => String(row.id)));
+      if (childIds.some((childId) => ancestorIds.has(String(childId)))) {
+        await client.query('ROLLBACK');
+        return fail(res, 409, 'Una società madre non può essere impostata anche come figlia.');
+      }
+      const existingChildren = await client.query('SELECT id FROM companies WHERE id = ANY($1::bigint[])', [childIds]);
+      if (existingChildren.rowCount !== childIds.length) {
+        await client.query('ROLLBACK');
+        return fail(res, 400, 'Una o più ragioni sociali figlie non esistono.');
+      }
+    }
+
+    await client.query(
+      'UPDATE companies SET legal_name = $1, tax_code = $2, parent_company_id = $3, updated_at = NOW() WHERE id = $4',
+      [legalName, taxCode, parentCompanyId, id]
+    );
+    if (hasChildren) {
+      await client.query(
+        'UPDATE companies SET parent_company_id = NULL, updated_at = NOW() WHERE parent_company_id = $1 AND NOT (id = ANY($2::bigint[]))',
+        [id, childIds]
+      );
+      for (const childId of childIds) {
+        await client.query('UPDATE companies SET parent_company_id = $1, updated_at = NOW() WHERE id = $2', [id, childId]);
+      }
+    }
+    const result = await client.query('SELECT * FROM companies WHERE id = $1', [id]);
+    await client.query('COMMIT');
     res.json({ data: result.rows[0] });
-  } catch (error) { if (error.code === '23505') return fail(res, 409, 'Ragione sociale già presente.'); next(error); }
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    if (error.code === '23505') return fail(res, 409, 'Ragione sociale già presente.');
+    if (error.code === '23503') return fail(res, 400, 'La ragione sociale madre o una figlia selezionata non esiste.');
+    next(error);
+  } finally { client.release(); }
 });
 
 app.delete('/companies/:id', requireRole('admin'), async (req, res, next) => {
@@ -335,11 +428,16 @@ app.delete('/companies/:id', requireRole('admin'), async (req, res, next) => {
   if (!id) return fail(res, 400, 'ID non valido.');
   try {
     const usage = await pool.query('SELECT 1 FROM branches WHERE company_id = $1 LIMIT 1', [id]);
-    if (usage.rowCount) return fail(res, 409, 'La ragione sociale è associata a una o più filiali.');
+    if (usage.rowCount) return fail(res, 409, 'La ragione sociale è associata a una o più filiali. Riassegna o elimina prima le filiali.');
+    const children = await pool.query('SELECT 1 FROM companies WHERE parent_company_id = $1 LIMIT 1', [id]);
+    if (children.rowCount) return fail(res, 409, 'La ragione sociale ha società figlie. Riassegna o rimuovi prima la relazione con le figlie.');
     const result = await pool.query('DELETE FROM companies WHERE id = $1 RETURNING id', [id]);
     if (!result.rowCount) return fail(res, 404, 'Ragione sociale non trovata.');
     res.status(204).end();
-  } catch (error) { next(error); }
+  } catch (error) {
+    if (error.code === '23503') return fail(res, 409, 'La ragione sociale è collegata ad altri dati e non può essere eliminata.');
+    next(error);
+  }
 });
 
 app.get('/branches', async (_req, res, next) => {
@@ -373,6 +471,23 @@ app.post('/branches', requireRole('admin', 'technician'), async (req, res, next)
     await pool.query('INSERT INTO branch_active_history(branch_id, is_active, active_since) VALUES ($1,$2,$3)', [result.rows[0].id, isActive, activeSince]);
     res.status(201).json({ data: result.rows[0] });
   } catch (error) { if (error.code === '23503') return fail(res, 400, 'Ragione sociale inesistente.'); next(error); }
+});
+
+app.delete('/branches/:id', requireRole('admin'), async (req, res, next) => {
+  const id = parseId(req.params.id);
+  if (!id) return fail(res, 400, 'ID filiale non valido.');
+  try {
+    const exists = await pool.query('SELECT id FROM branches WHERE id = $1', [id]);
+    if (!exists.rowCount) return fail(res, 404, 'Filiale non trovata.');
+    const devices = await pool.query('SELECT 1 FROM devices WHERE branch_id = $1 LIMIT 1', [id]);
+    if (devices.rowCount) return fail(res, 409, 'La filiale ha dispositivi assegnati. Riassegna o disattiva i dispositivi prima di eliminarla.');
+    const result = await pool.query('DELETE FROM branches WHERE id = $1 RETURNING id', [id]);
+    if (!result.rowCount) return fail(res, 404, 'Filiale non trovata.');
+    res.status(204).end();
+  } catch (error) {
+    if (error.code === '23503') return fail(res, 409, 'La filiale è collegata ad altri dati storici o amministrativi e non può essere eliminata.');
+    next(error);
+  }
 });
 
 app.get('/branches/:id', async (req, res, next) => {
