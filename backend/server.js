@@ -758,14 +758,25 @@ app.post('/devices/bulk-update', requireRole('admin', 'technician', 'warehouse')
     : field + ' = $1';
   const values = [value, branchIds.length ? branchIds : null];
   const where = 'branch_id IS NOT NULL AND ($2::bigint[] IS NULL OR branch_id = ANY($2::bigint[]))';
+  const client = await pool.connect();
 
   try {
-    const result = await pool.query('UPDATE devices SET ' + assignments + ', updated_at = NOW() WHERE ' + where + ' RETURNING id', values);
+    await client.query('BEGIN');
+    const selected = await client.query('SELECT * FROM devices WHERE ' + where + ' FOR UPDATE', [branchIds.length ? branchIds : null]);
+    const result = await client.query('UPDATE devices SET ' + assignments + ', updated_at = NOW() WHERE ' + where + ' RETURNING id', values);
+    if (field === 'status' && value === 'operational') {
+      for (const device of selected.rows) {
+        await consumeDeviceStock(client, { ...device, status: 'operational' }, device.branch_id, 'operational', req.user.id);
+      }
+    }
+    await client.query('COMMIT');
     res.json({ updated_count: result.rowCount });
   } catch (error) {
+    await client.query('ROLLBACK');
     if (error.code === '23503') return fail(res, 400, 'Ordine di provenienza o magazzino non valido.');
+    if (error.code === 'STOCK_UNAVAILABLE') return fail(res, 409, error.message);
     next(error);
-  }
+  } finally { client.release(); }
 });
 
 app.put('/devices/:id', requireRole('admin', 'technician', 'warehouse'), async (req, res, next) => {
@@ -998,17 +1009,23 @@ app.post('/stock/movements', requireRole('admin', 'warehouse', 'technician'), as
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    const found = await client.query('SELECT * FROM devices WHERE id = $1 FOR UPDATE', [deviceId]);
+    if (!found.rowCount) { await client.query('ROLLBACK'); return fail(res, 404, 'Dispositivo non trovato.'); }
+    const device = found.rows[0];
     const movement = await client.query(
       'INSERT INTO stock_movements(device_id, from_location_id, to_location_id, branch_id, movement_type, notes, moved_by) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *',
       [deviceId, fromId, toId, branchId, type, notes, req.user.id]
     );
     const status = branchId ? 'operational' : 'in_stock';
-    await client.query('UPDATE devices SET stock_location_id = $1, branch_id = $2, status = $3, installed_on = CASE WHEN $2 IS NOT NULL THEN COALESCE(installed_on, CURRENT_DATE) ELSE NULL END, updated_at = NOW() WHERE id = $4', [toId, branchId, status, deviceId]);
+    const stockLocationId = branchId ? (fromId || device.stock_location_id || toId) : toId;
+    await client.query('UPDATE devices SET stock_location_id = $1, branch_id = $2, status = $3, installed_on = CASE WHEN $2 IS NOT NULL THEN COALESCE(installed_on, CURRENT_DATE) ELSE NULL END, updated_at = NOW() WHERE id = $4', [stockLocationId, branchId, status, deviceId]);
+    await consumeDeviceStock(client, { ...device, stock_location_id: stockLocationId }, branchId, status, req.user.id);
     await client.query('COMMIT');
     res.status(201).json({ data: movement.rows[0] });
   } catch (error) {
     await client.query('ROLLBACK');
     if (error.code === '23503') return fail(res, 400, 'Dispositivo, filiale o magazzino non valido.');
+    if (error.code === 'STOCK_UNAVAILABLE') return fail(res, 409, error.message);
     next(error);
   } finally { client.release(); }
 });
