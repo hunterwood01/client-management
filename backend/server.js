@@ -301,7 +301,17 @@ app.get('/dashboard', async (req, res, next) => {
 
 app.get('/companies', async (_req, res, next) => {
   try {
-    const result = await pool.query('SELECT c.*, COUNT(b.id)::int AS branch_count FROM companies c LEFT JOIN branches b ON b.company_id = c.id GROUP BY c.id ORDER BY c.legal_name');
+    const result = await pool.query(`
+      SELECT c.*, parent.legal_name AS parent_company_name,
+        COUNT(DISTINCT b.id)::int AS branch_count,
+        COUNT(DISTINCT child.id)::int AS child_company_count
+      FROM companies c
+      LEFT JOIN companies parent ON parent.id = c.parent_company_id
+      LEFT JOIN branches b ON b.company_id = c.id
+      LEFT JOIN companies child ON child.parent_company_id = c.id
+      GROUP BY c.id, parent.legal_name
+      ORDER BY c.legal_name
+    `);
     res.json({ data: result.rows });
   } catch (error) { next(error); }
 });
@@ -309,25 +319,108 @@ app.get('/companies', async (_req, res, next) => {
 app.post('/companies', requireRole('admin'), async (req, res, next) => {
   const legalName = cleanString(req.body?.legal_name, 200);
   const taxCode = cleanString(req.body?.tax_code, 50);
+  const rawParentId = req.body?.parent_company_id;
+  const parentCompanyId = rawParentId === '' || rawParentId === null || rawParentId === undefined ? null : parseId(rawParentId);
   if (legalName === undefined || taxCode === undefined) return fail(res, 400, 'Verificare i campi inseriti.');
   if (!legalName) return fail(res, 400, 'La ragione sociale è obbligatoria.');
+  if (rawParentId !== '' && rawParentId !== null && rawParentId !== undefined && !parentCompanyId) return fail(res, 400, 'Ragione sociale madre non valida.');
   try {
-    const result = await pool.query('INSERT INTO companies(legal_name, tax_code) VALUES ($1, $2) RETURNING *', [legalName, taxCode]);
+    const result = await pool.query(
+      'INSERT INTO companies(legal_name, tax_code, parent_company_id) VALUES ($1, $2, $3) RETURNING *',
+      [legalName, taxCode, parentCompanyId]
+    );
     res.status(201).json({ data: result.rows[0] });
-  } catch (error) { if (error.code === '23505') return fail(res, 409, 'Ragione sociale già presente.'); next(error); }
+  } catch (error) {
+    if (error.code === '23505') return fail(res, 409, 'Ragione sociale già presente.');
+    if (error.code === '23503') return fail(res, 400, 'La ragione sociale madre selezionata non esiste.');
+    next(error);
+  }
 });
 
 app.put('/companies/:id', requireRole('admin'), async (req, res, next) => {
   const id = parseId(req.params.id);
   const legalName = cleanString(req.body?.legal_name, 200);
   const taxCode = cleanString(req.body?.tax_code, 50);
+  const hasParent = Object.hasOwn(req.body || {}, 'parent_company_id');
+  const rawParentId = req.body?.parent_company_id;
+  const parsedParentId = rawParentId === '' || rawParentId === null || rawParentId === undefined ? null : parseId(rawParentId);
+  const hasChildren = Object.hasOwn(req.body || {}, 'child_company_ids');
+  const rawChildIds = req.body?.child_company_ids;
   if (!id) return fail(res, 400, 'ID non valido.');
   if (legalName === undefined || taxCode === undefined || !legalName) return fail(res, 400, 'Ragione sociale non valida.');
+  if (hasParent && rawParentId !== '' && rawParentId !== null && rawParentId !== undefined && !parsedParentId) return fail(res, 400, 'Ragione sociale madre non valida.');
+  if (hasChildren && !Array.isArray(rawChildIds)) return fail(res, 400, 'Elenco delle ragioni sociali figlie non valido.');
+  const childIds = hasChildren ? rawChildIds.map(parseId) : [];
+  if (hasChildren && (childIds.some((childId) => !childId) || new Set(childIds).size !== childIds.length || childIds.includes(id))) {
+    return fail(res, 400, 'Una o più ragioni sociali figlie non sono valide.');
+  }
+  if (hasParent && parsedParentId === id) return fail(res, 409, 'Una ragione sociale non può essere madre di sé stessa.');
+  if (hasParent && parsedParentId && hasChildren && childIds.includes(parsedParentId)) {
+    return fail(res, 409, 'La ragione sociale madre non può essere anche una figlia.');
+  }
+
+  const client = await pool.connect();
   try {
-    const result = await pool.query('UPDATE companies SET legal_name = $1, tax_code = $2, updated_at = NOW() WHERE id = $3 RETURNING *', [legalName, taxCode, id]);
-    if (!result.rowCount) return fail(res, 404, 'Ragione sociale non trovata.');
+    await client.query('BEGIN');
+    const current = await client.query('SELECT id, parent_company_id FROM companies WHERE id = $1 FOR UPDATE', [id]);
+    if (!current.rowCount) { await client.query('ROLLBACK'); return fail(res, 404, 'Ragione sociale non trovata.'); }
+    const parentCompanyId = hasParent ? parsedParentId : current.rows[0].parent_company_id;
+
+    if (parentCompanyId) {
+      const cycle = await client.query(`
+        WITH RECURSIVE descendants(id) AS (
+          SELECT id FROM companies WHERE parent_company_id = $1
+          UNION
+          SELECT c.id FROM companies c JOIN descendants d ON c.parent_company_id = d.id
+        )
+        SELECT 1 FROM descendants WHERE id = $2 LIMIT 1
+      `, [id, parentCompanyId]);
+      if (cycle.rowCount) { await client.query('ROLLBACK'); return fail(res, 409, 'La società madre selezionata creerebbe un ciclo nella gerarchia.'); }
+    }
+
+    if (hasChildren && childIds.length) {
+      const ancestors = await client.query(`
+        WITH RECURSIVE ancestors(id) AS (
+          SELECT parent_company_id FROM companies WHERE id = $1 AND parent_company_id IS NOT NULL
+          UNION
+          SELECT c.parent_company_id FROM companies c JOIN ancestors a ON c.id = a.id WHERE c.parent_company_id IS NOT NULL
+        )
+        SELECT id FROM ancestors
+      `, [id]);
+      const ancestorIds = new Set(ancestors.rows.map((row) => String(row.id)));
+      if (childIds.some((childId) => ancestorIds.has(String(childId)))) {
+        await client.query('ROLLBACK');
+        return fail(res, 409, 'Una società madre non può essere impostata anche come figlia.');
+      }
+      const existingChildren = await client.query('SELECT id FROM companies WHERE id = ANY($1::bigint[])', [childIds]);
+      if (existingChildren.rowCount !== childIds.length) {
+        await client.query('ROLLBACK');
+        return fail(res, 400, 'Una o più ragioni sociali figlie non esistono.');
+      }
+    }
+
+    await client.query(
+      'UPDATE companies SET legal_name = $1, tax_code = $2, parent_company_id = $3, updated_at = NOW() WHERE id = $4',
+      [legalName, taxCode, parentCompanyId, id]
+    );
+    if (hasChildren) {
+      await client.query(
+        'UPDATE companies SET parent_company_id = NULL, updated_at = NOW() WHERE parent_company_id = $1 AND NOT (id = ANY($2::bigint[]))',
+        [id, childIds]
+      );
+      for (const childId of childIds) {
+        await client.query('UPDATE companies SET parent_company_id = $1, updated_at = NOW() WHERE id = $2', [id, childId]);
+      }
+    }
+    const result = await client.query('SELECT * FROM companies WHERE id = $1', [id]);
+    await client.query('COMMIT');
     res.json({ data: result.rows[0] });
-  } catch (error) { if (error.code === '23505') return fail(res, 409, 'Ragione sociale già presente.'); next(error); }
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    if (error.code === '23505') return fail(res, 409, 'Ragione sociale già presente.');
+    if (error.code === '23503') return fail(res, 400, 'La ragione sociale madre o una figlia selezionata non esiste.');
+    next(error);
+  } finally { client.release(); }
 });
 
 app.delete('/companies/:id', requireRole('admin'), async (req, res, next) => {
@@ -335,11 +428,16 @@ app.delete('/companies/:id', requireRole('admin'), async (req, res, next) => {
   if (!id) return fail(res, 400, 'ID non valido.');
   try {
     const usage = await pool.query('SELECT 1 FROM branches WHERE company_id = $1 LIMIT 1', [id]);
-    if (usage.rowCount) return fail(res, 409, 'La ragione sociale è associata a una o più filiali.');
+    if (usage.rowCount) return fail(res, 409, 'La ragione sociale è associata a una o più filiali. Riassegna o elimina prima le filiali.');
+    const children = await pool.query('SELECT 1 FROM companies WHERE parent_company_id = $1 LIMIT 1', [id]);
+    if (children.rowCount) return fail(res, 409, 'La ragione sociale ha società figlie. Riassegna o rimuovi prima la relazione con le figlie.');
     const result = await pool.query('DELETE FROM companies WHERE id = $1 RETURNING id', [id]);
     if (!result.rowCount) return fail(res, 404, 'Ragione sociale non trovata.');
     res.status(204).end();
-  } catch (error) { next(error); }
+  } catch (error) {
+    if (error.code === '23503') return fail(res, 409, 'La ragione sociale è collegata ad altri dati e non può essere eliminata.');
+    next(error);
+  }
 });
 
 app.get('/branches', async (_req, res, next) => {
@@ -373,6 +471,23 @@ app.post('/branches', requireRole('admin', 'technician'), async (req, res, next)
     await pool.query('INSERT INTO branch_active_history(branch_id, is_active, active_since) VALUES ($1,$2,$3)', [result.rows[0].id, isActive, activeSince]);
     res.status(201).json({ data: result.rows[0] });
   } catch (error) { if (error.code === '23503') return fail(res, 400, 'Ragione sociale inesistente.'); next(error); }
+});
+
+app.delete('/branches/:id', requireRole('admin'), async (req, res, next) => {
+  const id = parseId(req.params.id);
+  if (!id) return fail(res, 400, 'ID filiale non valido.');
+  try {
+    const exists = await pool.query('SELECT id FROM branches WHERE id = $1', [id]);
+    if (!exists.rowCount) return fail(res, 404, 'Filiale non trovata.');
+    const devices = await pool.query('SELECT 1 FROM devices WHERE branch_id = $1 LIMIT 1', [id]);
+    if (devices.rowCount) return fail(res, 409, 'La filiale ha dispositivi assegnati. Riassegna o disattiva i dispositivi prima di eliminarla.');
+    const result = await pool.query('DELETE FROM branches WHERE id = $1 RETURNING id', [id]);
+    if (!result.rowCount) return fail(res, 404, 'Filiale non trovata.');
+    res.status(204).end();
+  } catch (error) {
+    if (error.code === '23503') return fail(res, 409, 'La filiale è collegata ad altri dati storici o amministrativi e non può essere eliminata.');
+    next(error);
+  }
 });
 
 app.get('/branches/:id', async (req, res, next) => {
@@ -654,6 +769,26 @@ app.get('/devices', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+// Reconcile available stock once when a warehouse-sourced device becomes operational at a branch.
+async function consumeDeviceStock(client, device, branchId, status, userId) {
+  if (!branchId || status !== 'operational' || !device.stock_location_id || device.stock_consumed) return false;
+  const stock = await client.query(
+    'UPDATE product_stock SET quantity = quantity - 1, updated_at = NOW() WHERE device_model_id = $1 AND stock_location_id = $2 AND quantity > 0 RETURNING quantity',
+    [device.model_id, device.stock_location_id]
+  );
+  if (!stock.rowCount) {
+    const error = new Error('Quantità disponibile insufficiente nel magazzino selezionato.');
+    error.code = 'STOCK_UNAVAILABLE';
+    throw error;
+  }
+  await client.query(
+    "INSERT INTO product_stock_movements(device_model_id,stock_location_id,quantity_delta,movement_type,device_id,notes,moved_by) VALUES($1,$2,-1,'activation',$3,$4,$5)",
+    [device.model_id, device.stock_location_id, device.id, 'Attivazione presso filiale ' + branchId, userId]
+  );
+  await client.query('UPDATE devices SET stock_consumed = TRUE WHERE id = $1', [device.id]);
+  return true;
+}
+
 app.post('/devices', requireRole('admin', 'technician', 'warehouse'), async (req, res, next) => {
   const modelId = parseId(req.body?.model_id);
   const branchId = req.body?.branch_id ? parseId(req.body.branch_id) : null;
@@ -673,13 +808,24 @@ app.post('/devices', requireRole('admin', 'technician', 'warehouse'), async (req
   if (!['to_activate', 'operational', 'fault', 'decommissioned', 'in_stock'].includes(status)) return fail(res, 400, 'Stato dispositivo non valido.');
   if (!['sale', 'rental'].includes(ownership)) return fail(res, 400, 'Tipologia economica non valida.');
   if ((cost !== null && (!Number.isFinite(Number(cost)) || Number(cost) < 0)) || (fee !== null && (!Number.isFinite(Number(fee)) || Number(fee) < 0))) return fail(res, 400, 'Importi non validi.');
+  const client = await pool.connect();
   try {
-    const result = await pool.query(
+    await client.query('BEGIN');
+    const result = await client.query(
       'INSERT INTO devices(model_id, branch_id, stock_location_id, purchase_profile_id, asset_tag, serial_number, status, ownership_type, purchase_cost, monthly_fee, purchased_on, activated_on, installed_on, notes) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,CASE WHEN $4::bigint IS NOT NULL THEN (SELECT unit_cost FROM purchase_profiles WHERE id=$4) ELSE $9 END,$10,$11,$12,$13,$14) RETURNING *',
       [modelId, branchId, stockLocationId, purchaseProfileId, assetTag, serial, status, ownership, cost, fee, purchased, activated, installed, notes]
     );
-    res.status(201).json({ data: result.rows[0] });
-  } catch (error) { if (error.code === '23505') return fail(res, 409, 'Asset tag già presente.'); if (error.code === '23503') return fail(res, 400, 'Modello, filiale o magazzino non valido.'); next(error); }
+    await consumeDeviceStock(client, result.rows[0], branchId, status, req.user.id);
+    const saved = await client.query('SELECT * FROM devices WHERE id = $1', [result.rows[0].id]);
+    await client.query('COMMIT');
+    res.status(201).json({ data: saved.rows[0] });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    if (error.code === '23505') return fail(res, 409, 'Asset tag già presente.');
+    if (error.code === '23503') return fail(res, 400, 'Modello, filiale o magazzino non valido.');
+    if (error.code === 'STOCK_UNAVAILABLE') return fail(res, 409, error.message);
+    next(error);
+  } finally { client.release(); }
 });
 
 app.post('/devices/bulk-status', requireRole('admin', 'technician', 'warehouse'), async (req, res, next) => {
@@ -728,14 +874,25 @@ app.post('/devices/bulk-update', requireRole('admin', 'technician', 'warehouse')
     : field + ' = $1';
   const values = [value, branchIds.length ? branchIds : null];
   const where = 'branch_id IS NOT NULL AND ($2::bigint[] IS NULL OR branch_id = ANY($2::bigint[]))';
+  const client = await pool.connect();
 
   try {
-    const result = await pool.query('UPDATE devices SET ' + assignments + ', updated_at = NOW() WHERE ' + where + ' RETURNING id', values);
+    await client.query('BEGIN');
+    const selected = await client.query('SELECT * FROM devices WHERE branch_id IS NOT NULL AND ($1::bigint[] IS NULL OR branch_id = ANY($1::bigint[])) FOR UPDATE', [branchIds.length ? branchIds : null]);
+    const result = await client.query('UPDATE devices SET ' + assignments + ', updated_at = NOW() WHERE ' + where + ' RETURNING id', values);
+    if (field === 'status' && value === 'operational') {
+      for (const device of selected.rows) {
+        await consumeDeviceStock(client, { ...device, status: 'operational' }, device.branch_id, 'operational', req.user.id);
+      }
+    }
+    await client.query('COMMIT');
     res.json({ updated_count: result.rowCount });
   } catch (error) {
+    await client.query('ROLLBACK');
     if (error.code === '23503') return fail(res, 400, 'Ordine di provenienza o magazzino non valido.');
+    if (error.code === 'STOCK_UNAVAILABLE') return fail(res, 409, error.message);
     next(error);
-  }
+  } finally { client.release(); }
 });
 
 app.put('/devices/:id', requireRole('admin', 'technician', 'warehouse'), async (req, res, next) => {
@@ -757,12 +914,37 @@ app.put('/devices/:id', requireRole('admin', 'technician', 'warehouse'), async (
     assignments.push(field + ' = $' + values.length);
   }
   if (!assignments.length) return fail(res, 400, 'Specificare almeno un campo.');
-  values.push(id);
+  const client = await pool.connect();
   try {
-    const result = await pool.query('UPDATE devices SET ' + assignments.join(', ') + ', updated_at = NOW() WHERE id = $' + values.length + ' RETURNING *', values);
+    await client.query('BEGIN');
+    const found = await client.query('SELECT * FROM devices WHERE id = $1 FOR UPDATE', [id]);
+    if (!found.rowCount) { await client.query('ROLLBACK'); return fail(res, 404, 'Dispositivo non trovato.'); }
+    values.push(id);
+    await client.query('UPDATE devices SET ' + assignments.join(', ') + ', updated_at = NOW() WHERE id = $' + values.length, values);
+    const current = await client.query('SELECT * FROM devices WHERE id = $1', [id]);
+    await consumeDeviceStock(client, current.rows[0], current.rows[0].branch_id, current.rows[0].status, req.user.id);
+    const saved = await client.query('SELECT * FROM devices WHERE id = $1', [id]);
+    await client.query('COMMIT');
+    res.json({ data: saved.rows[0] });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    if (error.code === '23505') return fail(res, 409, 'Asset tag già presente.');
+    if (error.code === 'STOCK_UNAVAILABLE') return fail(res, 409, error.message);
+    next(error);
+  } finally { client.release(); }
+});
+
+app.delete('/devices/:id', requireRole('admin'), async (req, res, next) => {
+  const id = parseId(req.params.id);
+  if (!id) return fail(res, 400, 'ID dispositivo non valido.');
+  try {
+    const result = await pool.query('DELETE FROM devices WHERE id = $1 RETURNING id', [id]);
     if (!result.rowCount) return fail(res, 404, 'Dispositivo non trovato.');
-    res.json({ data: result.rows[0] });
-  } catch (error) { if (error.code === '23505') return fail(res, 409, 'Asset tag già presente.'); next(error); }
+    res.status(204).end();
+  } catch (error) {
+    if (error.code === '23503') return fail(res, 409, 'Il dispositivo è collegato a registrazioni che ne impediscono l’eliminazione. Rimuovi o correggi prima i riferimenti collegati.');
+    next(error);
+  }
 });
 
 app.get('/stock/locations', async (_req, res, next) => {
@@ -883,7 +1065,29 @@ app.delete('/license-purchase-orders/:id', requireRole('admin'), async (req, res
 });
 
 app.get('/product-stock',async(_req,res,next)=>{
- try{const result=await pool.query('SELECT ps.*,m.sku,m.manufacturer,m.model_name,sl.name AS stock_location_name FROM product_stock ps JOIN device_models m ON m.id=ps.device_model_id JOIN stock_locations sl ON sl.id=ps.stock_location_id ORDER BY m.manufacturer,m.model_name,sl.name');res.json({data:result.rows});}catch(error){next(error);}
+ try{
+  const result=await pool.query(`
+   SELECT ps.*,m.sku,m.manufacturer,m.model_name,sl.name AS stock_location_name,
+    GREATEST(0,ps.quantity-COALESCE(untracked.quantity,0))::int AS available_quantity,
+    (ps.quantity+COALESCE(consumed.quantity,0))::int AS total_quantity
+   FROM product_stock ps
+   JOIN device_models m ON m.id=ps.device_model_id
+   JOIN stock_locations sl ON sl.id=ps.stock_location_id
+   LEFT JOIN LATERAL (
+    SELECT COUNT(*)::int AS quantity FROM devices d
+    WHERE d.model_id=ps.device_model_id AND d.stock_location_id=ps.stock_location_id
+     AND d.branch_id IS NOT NULL AND d.status IN ('operational','fault','decommissioned')
+     AND COALESCE(d.stock_consumed,FALSE)=FALSE
+   ) untracked ON TRUE
+   LEFT JOIN LATERAL (
+    SELECT COUNT(*)::int AS quantity FROM devices d
+    WHERE d.model_id=ps.device_model_id AND d.stock_location_id=ps.stock_location_id
+     AND COALESCE(d.stock_consumed,FALSE)=TRUE
+   ) consumed ON TRUE
+   ORDER BY m.manufacturer,m.model_name,sl.name
+  `);
+  res.json({data:result.rows});
+ }catch(error){next(error);}
 });
 
 app.post('/devices/:id/activate',requireRole('admin','technician','warehouse'),async(req,res,next)=>{
@@ -898,7 +1102,7 @@ app.post('/devices/:id/activate',requireRole('admin','technician','warehouse'),a
   if(!found.rowCount){await client.query('ROLLBACK');return fail(res,404,'Device non trovato.');}
   const device=found.rows[0],fee=req.body?.monthly_fee===''||req.body?.monthly_fee===undefined?(device.monthly_fee??device.default_monthly_fee):Number(req.body.monthly_fee);
   if(ownership==='rental'&&(fee===null||!Number.isFinite(Number(fee))||Number(fee)<0)){await client.query('ROLLBACK');return fail(res,400,'Per NOL è obbligatorio un canone mensile valido.');}
-  if(device.branch_id===null&&device.stock_location_id&&!device.stock_consumed){
+  if(device.stock_location_id&&!device.stock_consumed){
    const stock=await client.query('UPDATE product_stock SET quantity=quantity-1,updated_at=NOW() WHERE device_model_id=$1 AND stock_location_id=$2 AND quantity>0 RETURNING quantity',[device.model_id,device.stock_location_id]);
    if(!stock.rowCount){await client.query('ROLLBACK');return fail(res,409,'Quantità disponibile insufficiente nel magazzino selezionato.');}
    await client.query("INSERT INTO product_stock_movements(device_model_id,stock_location_id,quantity_delta,movement_type,device_id,notes,moved_by) VALUES($1,$2,-1,'activation',$3,$4,$5)",[device.model_id,device.stock_location_id,id,'Attivazione presso filiale '+branchId,req.user.id]);
@@ -914,7 +1118,11 @@ app.post('/devices/:id/deactivate',requireRole('admin','technician','warehouse')
  const client=await pool.connect();
  try{await client.query('BEGIN');const found=await client.query('SELECT * FROM devices WHERE id=$1 FOR UPDATE',[id]);if(!found.rowCount){await client.query('ROLLBACK');return fail(res,404,'Device non trovato.');}
  const device=found.rows[0];if(device.ownership_type==='rental')await client.query('UPDATE device_nol_history SET deactivated_on=$1 WHERE device_id=$2 AND deactivated_on IS NULL',[deactivatedOn,id]);
- await client.query("UPDATE devices SET deactivated_on=$1,status='in_stock',branch_id=NULL,updated_at=NOW() WHERE id=$2",[deactivatedOn,id]);await client.query('COMMIT');res.status(204).end();
+ if(device.stock_consumed&&device.stock_location_id){
+  await client.query('UPDATE product_stock SET quantity=quantity+1,updated_at=NOW() WHERE device_model_id=$1 AND stock_location_id=$2',[device.model_id,device.stock_location_id]);
+  await client.query("INSERT INTO product_stock_movements(device_model_id,stock_location_id,quantity_delta,movement_type,device_id,notes,moved_by) VALUES($1,$2,1,'deactivation',$3,$4,$5)",[device.model_id,device.stock_location_id,id,'Rientro a magazzino del device '+id,req.user.id]);
+ }
+ await client.query("UPDATE devices SET deactivated_on=$1,status='in_stock',branch_id=NULL,stock_consumed=FALSE,updated_at=NOW() WHERE id=$2",[deactivatedOn,id]);await client.query('COMMIT');res.status(204).end();
  }catch(error){await client.query('ROLLBACK');next(error);}finally{client.release();}
 });
 
@@ -938,17 +1146,23 @@ app.post('/stock/movements', requireRole('admin', 'warehouse', 'technician'), as
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    const found = await client.query('SELECT * FROM devices WHERE id = $1 FOR UPDATE', [deviceId]);
+    if (!found.rowCount) { await client.query('ROLLBACK'); return fail(res, 404, 'Dispositivo non trovato.'); }
+    const device = found.rows[0];
     const movement = await client.query(
       'INSERT INTO stock_movements(device_id, from_location_id, to_location_id, branch_id, movement_type, notes, moved_by) VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *',
       [deviceId, fromId, toId, branchId, type, notes, req.user.id]
     );
     const status = branchId ? 'operational' : 'in_stock';
-    await client.query('UPDATE devices SET stock_location_id = $1, branch_id = $2, status = $3, installed_on = CASE WHEN $2 IS NOT NULL THEN COALESCE(installed_on, CURRENT_DATE) ELSE NULL END, updated_at = NOW() WHERE id = $4', [toId, branchId, status, deviceId]);
+    const stockLocationId = branchId ? (fromId || device.stock_location_id || toId) : toId;
+    await client.query('UPDATE devices SET stock_location_id = $1, branch_id = $2, status = $3, installed_on = CASE WHEN $2 IS NOT NULL THEN COALESCE(installed_on, CURRENT_DATE) ELSE NULL END, updated_at = NOW() WHERE id = $4', [stockLocationId, branchId, status, deviceId]);
+    await consumeDeviceStock(client, { ...device, stock_location_id: stockLocationId }, branchId, status, req.user.id);
     await client.query('COMMIT');
     res.status(201).json({ data: movement.rows[0] });
   } catch (error) {
     await client.query('ROLLBACK');
     if (error.code === '23503') return fail(res, 400, 'Dispositivo, filiale o magazzino non valido.');
+    if (error.code === 'STOCK_UNAVAILABLE') return fail(res, 409, error.message);
     next(error);
   } finally { client.release(); }
 });
