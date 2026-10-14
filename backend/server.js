@@ -762,7 +762,7 @@ app.post('/devices/bulk-update', requireRole('admin', 'technician', 'warehouse')
 
   try {
     await client.query('BEGIN');
-    const selected = await client.query('SELECT * FROM devices WHERE ' + where + ' FOR UPDATE', [branchIds.length ? branchIds : null]);
+    const selected = await client.query('SELECT * FROM devices WHERE branch_id IS NOT NULL AND ($1::bigint[] IS NULL OR branch_id = ANY($1::bigint[])) FOR UPDATE', [branchIds.length ? branchIds : null]);
     const result = await client.query('UPDATE devices SET ' + assignments + ', updated_at = NOW() WHERE ' + where + ' RETURNING id', values);
     if (field === 'status' && value === 'operational') {
       for (const device of selected.rows) {
