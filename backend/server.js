@@ -765,6 +765,19 @@ app.put('/devices/:id', requireRole('admin', 'technician', 'warehouse'), async (
   } catch (error) { if (error.code === '23505') return fail(res, 409, 'Asset tag già presente.'); next(error); }
 });
 
+app.delete('/devices/:id', requireRole('admin'), async (req, res, next) => {
+  const id = parseId(req.params.id);
+  if (!id) return fail(res, 400, 'ID dispositivo non valido.');
+  try {
+    const result = await pool.query('DELETE FROM devices WHERE id = $1 RETURNING id', [id]);
+    if (!result.rowCount) return fail(res, 404, 'Dispositivo non trovato.');
+    res.status(204).end();
+  } catch (error) {
+    if (error.code === '23503') return fail(res, 409, 'Il dispositivo è collegato a registrazioni che ne impediscono l’eliminazione. Rimuovi o correggi prima i riferimenti collegati.');
+    next(error);
+  }
+});
+
 app.get('/stock/locations', async (_req, res, next) => {
   try {
     const result = await pool.query('SELECT sl.*, COUNT(d.id)::int AS device_count FROM stock_locations sl LEFT JOIN devices d ON d.stock_location_id = sl.id GROUP BY sl.id ORDER BY sl.name');
