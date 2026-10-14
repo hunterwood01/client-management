@@ -354,3 +354,9 @@ tbody tr:hover td { background: color-mix(in srgb, var(--surface-soft) 72%, tran
   .bulk-status-controls, .bulk-status-actions { width: 100%; }
   .bulk-status-actions button { flex: 1; }
 }
+
+
+.table-sort-button { display: inline-flex; align-items: center; gap: 5px; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; text-transform: inherit; letter-spacing: inherit; font-weight: inherit; cursor: pointer; white-space: nowrap; }
+.table-sort-button:hover { color: var(--text); }
+.table-sort-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 3px; }
+.table-sort-button span { opacity: .7; font-size: 11px; }
