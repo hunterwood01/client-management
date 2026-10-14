@@ -795,7 +795,28 @@ app.put('/devices/:id', requireRole('admin', 'technician', 'warehouse'), async (
     else value = cleanString(value, limits[field] || 200);
     if (value === undefined || (['purchase_cost', 'monthly_fee'].includes(field) && value !== null && (!Number.isFinite(value) || value < 0))) return fail(res, 400, 'Campo non valido: ' + field);
     values.push(value);
-    assignments.push(field + ' = 
+    assignments.push(field + ' = $' + values.length);
+  }
+  if (!assignments.length) return fail(res, 400, 'Specificare almeno un campo.');
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const found = await client.query('SELECT * FROM devices WHERE id = $1 FOR UPDATE', [id]);
+    if (!found.rowCount) { await client.query('ROLLBACK'); return fail(res, 404, 'Dispositivo non trovato.'); }
+    values.push(id);
+    await client.query('UPDATE devices SET ' + assignments.join(', ') + ', updated_at = NOW() WHERE id = $' + values.length, values);
+    const current = await client.query('SELECT * FROM devices WHERE id = $1', [id]);
+    await consumeDeviceStock(client, current.rows[0], current.rows[0].branch_id, current.rows[0].status, req.user.id);
+    const saved = await client.query('SELECT * FROM devices WHERE id = $1', [id]);
+    await client.query('COMMIT');
+    res.json({ data: saved.rows[0] });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    if (error.code === '23505') return fail(res, 409, 'Asset tag già presente.');
+    if (error.code === 'STOCK_UNAVAILABLE') return fail(res, 409, error.message);
+    next(error);
+  } finally { client.release(); }
+});
 
 app.delete('/devices/:id', requireRole('admin'), async (req, res, next) => {
   const id = parseId(req.params.id);
