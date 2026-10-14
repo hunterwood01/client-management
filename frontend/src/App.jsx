@@ -382,7 +382,7 @@ export default function App() {
     const branchLabel = bulkBranchIds.length ? 'nelle filiali selezionate' : 'in tutte le filiali';
     const changedCount = bulkDevices.filter((device) => {
       if (device.branch_id == null || (bulkBranchIds.length && !bulkBranchIds.includes(String(device.branch_id)))) return false;
-      const current = bulkField === 'activated_on' ? (device.activated_on || device.installed_on || '') : device[bulkField];
+      const current = bulkField === 'activated_on' ? String(device.activated_on || device.installed_on || '').slice(0, 10) : device[bulkField];
       return String(current ?? '') !== String(bulkValue ?? '');
     }).length;
     if (!changedCount) {
@@ -704,7 +704,7 @@ export default function App() {
           {bulkField === 'stock_location_id' && <label>Magazzino di provenienza<select value={bulkValue} onChange={(event) => setBulkValue(event.target.value)}><option value="">Nessun magazzino</option>{locations.map((location) => <option key={location.id} value={String(location.id)}>{location.name}</option>)}</select></label>}
           <div className="panel bulk-preview">
             <strong>{bulkDevices.filter((device) => device.branch_id != null && (!bulkBranchIds.length || bulkBranchIds.includes(String(device.branch_id)))).length} device nelle filiali selezionate</strong>
-            <p className="field-hint">{bulkDevices.filter((device) => device.branch_id != null && (!bulkBranchIds.length || bulkBranchIds.includes(String(device.branch_id))) && String((bulkField === 'activated_on' ? (device.activated_on || device.installed_on || '') : device[bulkField]) ?? '') !== String(bulkValue ?? '')).length} device verranno modificati con il valore scelto.</p>
+            <p className="field-hint">{bulkDevices.filter((device) => device.branch_id != null && (!bulkBranchIds.length || bulkBranchIds.includes(String(device.branch_id))) && String((bulkField === 'activated_on' ? String(device.activated_on || device.installed_on || '').slice(0, 10) : device[bulkField]) ?? '') !== String(bulkValue ?? '')).length} device verranno modificati con il valore scelto.</p>
           </div>
           <div className="modal-actions"><button type="button" className="secondary-button" disabled={busy} onClick={() => setModal('')}>Annulla</button><button type="submit" className="primary-button" disabled={busy}>{busy ? 'Aggiornamento…' : 'Conferma modifica'}</button></div>
         </form>
