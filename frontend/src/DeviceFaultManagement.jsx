@@ -45,7 +45,7 @@ export default function DeviceFaultManagement({ device, devices, locations, prod
   }
   const availableAtWarehouse = devices.filter(item =>
     String(item.id) !== String(device.id) &&
-    item.status === 'in_stock' &&
+    ['in_stock', 'to_activate'].includes(item.status) &&
     !item.branch_id &&
     item.stock_consumed !== true &&
     Boolean(form.replacement_stock_location_id) &&
