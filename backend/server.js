@@ -750,8 +750,9 @@ app.delete('/purchase-profiles/:id', requireRole('admin'), async (req, res, next
     res.status(204).end();
   } catch (error) {
     await client.query('ROLLBACK');
-    if (error.code === '23503') return fail(res, 409, 'Impossibile eliminare l’ordine perché è ancora collegato ad altri dati.');
-    next(error);
+    if (error.code === '23503') return fail(res, 409, 'Impossibile eliminare l’ordine perché è ancora collegato ad altri dati. Verifica che non ci siano device o movimenti che lo utilizzano.');
+    console.error('Failed to delete hardware purchase order', { orderId: id, code: error.code, message: error.message });
+    return fail(res, 500, 'Errore durante l’eliminazione dell’ordine hardware. L’operazione è stata annullata e nessun dato è stato eliminato.');
   } finally {
     client.release();
   }
