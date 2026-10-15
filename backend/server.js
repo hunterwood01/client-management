@@ -727,7 +727,7 @@ app.put('/purchase-profiles/:id', requireRole('admin'), async (req, res, next) =
       );
       await client.query(
         "INSERT INTO product_stock_movements(device_model_id, stock_location_id, quantity_delta, movement_type, purchase_profile_id, notes, moved_by) VALUES ($1,$2,$3,'adjustment',$4,$5,$6)",
-        [order.device_model_id, order.stock_location_id, -reduction, 'Riduzione quantità ordine ' + (reference || order.reference || id), req.user.id]
+        [order.device_model_id, order.stock_location_id, -reduction, id, 'Riduzione quantità ordine ' + (reference || order.reference || id), req.user.id]
       );
     } else if (reduction > 0 && !order.stock_location_id) {
       if (quantity === 0 && availableCount > 0) {
@@ -754,7 +754,7 @@ app.put('/purchase-profiles/:id', requireRole('admin'), async (req, res, next) =
 
     if (quantity === 0) {
       await client.query(
-        "UPDATE product_stock_movements SET purchase_profile_id = NULL, notes = CONCAT(COALESCE(notes, ''), $1) WHERE purchase_profile_id = $2",
+        "UPDATE product_stock_movements SET purchase_profile_id = NULL, notes = CONCAT(COALESCE(notes, ''), $1::text) WHERE purchase_profile_id = $2",
         [' [ordine azzerato ed eliminato #' + id + (reference || order.reference ? ' · ' + (reference || order.reference) : '') + ']', id]
       );
       await client.query('DELETE FROM purchase_profiles WHERE id = $1', [id]);
@@ -818,12 +818,12 @@ app.delete('/purchase-profiles/:id', requireRole('admin'), async (req, res, next
         );
       }
       await client.query(
-        "UPDATE product_stock_movements SET purchase_profile_id = NULL, notes = CONCAT(COALESCE(notes, ''), $1) WHERE purchase_profile_id = $2",
+        "UPDATE product_stock_movements SET purchase_profile_id = NULL, notes = CONCAT(COALESCE(notes, ''), $1::text) WHERE purchase_profile_id = $2",
         [' [ordine eliminato #' + id + (order.reference ? ' · ' + order.reference : '') + ']', id]
       );
     } else {
       await client.query(
-        "UPDATE product_stock_movements SET purchase_profile_id = NULL, notes = CONCAT(COALESCE(notes, ''), $1) WHERE purchase_profile_id = $2",
+        "UPDATE product_stock_movements SET purchase_profile_id = NULL, notes = CONCAT(COALESCE(notes, ''), $1::text) WHERE purchase_profile_id = $2",
         [' [ordine eliminato #' + id + (order.reference ? ' · ' + order.reference : '') + ']', id]
       );
     }
