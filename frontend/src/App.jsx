@@ -51,15 +51,15 @@ function calculateDeviceAmortization(device, now = new Date()) {
   const startDate = String(device.activated_on || device.installed_on || '').slice(0, 10);
   const cost = Number(device.purchase_cost);
   const monthlyFee = Number(device.monthly_fee);
-  if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(startDate) || !Number.isFinite(cost) || cost <= 0 || !Number.isFinite(monthlyFee) || monthlyFee <= 0) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate) || !Number.isFinite(cost) || cost <= 0 || !Number.isFinite(monthlyFee) || monthlyFee <= 0) {
     return { available: false, complete: false, percent: 0 };
   }
   const [startYear, startMonth, startDay] = startDate.split('-').map(Number);
   const todayYear = now.getFullYear();
   const todayMonth = now.getMonth() + 1;
-  const todayDay = now.getDate();
+  const todayDate = [todayYear, String(todayMonth).padStart(2, '0'), String(now.getDate()).padStart(2, '0')].join('-');
   let elapsedMonths = (todayYear - startYear) * 12 + todayMonth - startMonth;
-  if (todayDay < startDay) elapsedMonths -= 1;
+  if (todayDate < addMonthsToDate(startDate, elapsedMonths)) elapsedMonths -= 1;
   elapsedMonths = Math.max(0, elapsedMonths);
   const requiredMonths = Math.ceil(cost / monthlyFee);
   const recovered = Math.min(cost, elapsedMonths * monthlyFee);
