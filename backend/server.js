@@ -806,9 +806,9 @@ app.post('/devices/:id/fault-events', requireRole('admin', 'technician', 'wareho
       await client.query("UPDATE devices SET branch_id=$1, status='to_activate', updated_at=NOW() WHERE id=$2", [original.rows[0].branch_id, replacementId]);
     }
     const inserted = await client.query(
-      `INSERT INTO device_fault_events(device_id,branch_id,fault_date,description,outcome,rma_number,rma_status,replacement_device_id,replacement_stock_location_id,additional_cost,cost_description,notes,created_by)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
-      [deviceId, original.rows[0].branch_id, faultDate, description, outcome, rmaNumber, rmaStatus, replacementId, replacementLocationId, additionalCost, costDescription, notes, req.user.id]);
+      `INSERT INTO device_fault_events(device_id,branch_id,fault_date,description,outcome,rma_number,rma_status,replacement_device_id,replacement_stock_location_id,additional_cost,cost_description,notes,created_by,status,closed_at)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,CASE WHEN $14='closed' THEN NOW() ELSE NULL END) RETURNING *`,
+      [deviceId, original.rows[0].branch_id, faultDate, description, outcome, rmaNumber, rmaStatus, replacementId, replacementLocationId, additionalCost, costDescription, notes, req.user.id, (outcome === 'resolved' || outcome === 'sci') ? 'closed' : 'open']);
     await client.query("UPDATE devices SET status=$1, updated_at=NOW() WHERE id=$2", [outcome === 'sci' ? 'decommissioned' : (outcome === 'resolved' ? 'operational' : 'fault'), deviceId]);
     await client.query('COMMIT');
     res.status(201).json({ data: inserted.rows[0] });
