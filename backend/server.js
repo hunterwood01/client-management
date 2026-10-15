@@ -548,8 +548,31 @@ app.get('/branches/:id/company-history', async (req, res, next) => {
   const id = parseId(req.params.id);
   if (!id) return fail(res, 400, 'ID non valido.');
   try {
-    const result = await pool.query('SELECT id, branch_id, from_company_name, to_company_name, changed_by, changed_at FROM branch_company_history WHERE branch_id = $1 ORDER BY changed_at DESC, id DESC', [id]);
-    res.json({ data: result.rows });
+    const [history, manualNames] = await Promise.all([
+      pool.query("SELECT id, branch_id, from_company_name, to_company_name, changed_by, changed_at, 'change' AS type FROM branch_company_history WHERE branch_id = $1", [id]),
+      pool.query("SELECT id, branch_id, company_name, created_by, created_at, 'manual' AS type FROM branch_previous_company_names WHERE branch_id = $1", [id])
+    ]);
+    const data = [
+      ...history.rows,
+      ...manualNames.rows
+    ].sort((a, b) => new Date(b.changed_at || b.created_at) - new Date(a.changed_at || a.created_at));
+    res.json({ data });
+  } catch (error) { next(error); }
+});
+
+app.post('/branches/:id/company-history/manual', requireRole('admin', 'technician'), async (req, res, next) => {
+  const branchId = parseId(req.params.id);
+  const companyName = cleanString(req.body?.company_name, 200);
+  if (!branchId) return fail(res, 400, 'ID filiale non valido.');
+  if (companyName === undefined || !companyName) return fail(res, 400, 'Inserire una ragione sociale precedente valida (massimo 200 caratteri).');
+  try {
+    const exists = await pool.query('SELECT id FROM branches WHERE id = $1', [branchId]);
+    if (!exists.rowCount) return fail(res, 404, 'Filiale non trovata.');
+    const result = await pool.query(
+      'INSERT INTO branch_previous_company_names (branch_id, company_name, created_by) VALUES ($1, $2, $3) RETURNING id, branch_id, company_name, created_by, created_at',
+      [branchId, companyName, req.user.display_name || req.user.username]
+    );
+    res.status(201).json({ data: { ...result.rows[0], type: 'manual' } });
   } catch (error) { next(error); }
 });
 
@@ -563,6 +586,20 @@ app.delete('/branches/:id/company-history/:historyId', requireRole('admin', 'tec
       [historyId, branchId]
     );
     if (!result.rowCount) return fail(res, 404, 'Voce dello storico non trovata.');
+    res.status(204).end();
+  } catch (error) { next(error); }
+});
+
+app.delete('/branches/:id/company-history/manual/:historyId', requireRole('admin', 'technician'), async (req, res, next) => {
+  const branchId = parseId(req.params.id);
+  const historyId = parseId(req.params.historyId);
+  if (!branchId || !historyId) return fail(res, 400, 'ID non valido.');
+  try {
+    const result = await pool.query(
+      'DELETE FROM branch_previous_company_names WHERE id = $1 AND branch_id = $2 RETURNING id',
+      [historyId, branchId]
+    );
+    if (!result.rowCount) return fail(res, 404, 'Voce storica manuale non trovata.');
     res.status(204).end();
   } catch (error) { next(error); }
 });
