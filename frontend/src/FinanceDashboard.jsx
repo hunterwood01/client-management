@@ -18,11 +18,8 @@ export default function FinanceDashboard({ finance, branches = [], devices = [],
 
   const allNolInvestment = useMemo(() => devices.filter(d => d.ownership_type === 'rental').reduce((sum, d) => sum + Number(d.purchase_cost || 0), 0), [devices]);
   const activeNolMonthly = Number(finance?.nol_current_month || 0);
-  const eaCurrentMonth = Number(finance?.global_charges_current_month || 0);
-  const eaAllTime = Number(finance?.global_charges_all_time || 0);
   const revenueAllTime = Number(finance?.nol_all_time || 0);
   const costs = Number(finance?.total_costs || 0);
-  const margin = Number(finance?.overall_margin || 0);
   const selectedBranch = branchFilter === 'all' ? null : branches.find(b => String(b.id) === String(branchFilter));
   const selectedLabel = selectedBranch ? [selectedBranch.company_name, selectedBranch.country, selectedBranch.street].filter(Boolean).join(' - ') : 'Tutte le filiali';
   const faultCount = devices.filter(d => d.status === 'fault').length;
@@ -37,24 +34,20 @@ export default function FinanceDashboard({ finance, branches = [], devices = [],
     <div className="finance-metrics-grid">
       <Metric label="NOL · mese corrente" value={money(finance?.nol_current_month)} caption="Canoni maturati nel mese" icon="↻" tone="green" />
       <Metric label="NOL · totale storico" value={money(revenueAllTime)} caption="Solo canoni dei device effettivamente attivati" icon="€" tone="violet" />
-      <Metric label="Canoni EA · mese corrente" value={money(eaCurrentMonth)} caption="Ricavo globale EA, separato dai canoni device" icon="↻" tone="green" />
-      <Metric label="Canoni EA · totale storico" value={money(eaAllTime)} caption="Canoni globali maturati nel periodo" icon="€" tone="violet" />
       <Metric label="Investimento device NOL" value={money(allNolInvestment)} caption="Costo registrato dei device NOL visibili" icon="▣" tone="blue" />
       <Metric label="Costi complessivi" value={money(costs)} caption="Hardware, licenze e altri costi registrati" icon="↘" tone="amber" />
-      <Metric label="Margine complessivo · include EA" value={money(margin)} caption="Canoni globali EA + ricavi device − costi registrati" icon="↗" tone={margin >= 0 ? 'green' : 'red'} />
       <Metric label="Device in stato guasto" value={String(faultCount)} caption="Apparati da gestire" icon="!" tone={faultCount ? 'red' : 'green'} />
     </div>
 
     <div className="finance-dashboard-grid">
       <section className="panel finance-panel">
-        <SectionHeading title="Andamento economico" subtitle="I canoni NOL dei device decorrono dall’attivazione; i canoni globali EA sono esposti separatamente." />
+        <SectionHeading title="Andamento economico" subtitle="Ricavi dei device NOL, costi registrati e investimenti hardware." />
         <div className="finance-bars">
-          <div className="finance-bar-row"><div><span>Ricavi NOL storici</span><strong>{money(revenueAllTime)}</strong></div><div className="finance-bar-track"><span className="green" style={{ width: Math.min(100, revenueAllTime / Math.max(revenueAllTime, eaAllTime, costs, allNolInvestment, 1) * 100) + '%' }} /></div></div>
-          <div className="finance-bar-row"><div><span>Canoni EA storici</span><strong>{money(eaAllTime)}</strong></div><div className="finance-bar-track"><span className="green" style={{ width: Math.min(100, eaAllTime / Math.max(revenueAllTime, eaAllTime, costs, allNolInvestment, 1) * 100) + '%' }} /></div></div>
-          <div className="finance-bar-row"><div><span>Costi registrati</span><strong>{money(costs)}</strong></div><div className="finance-bar-track"><span className="amber" style={{ width: Math.min(100, costs / Math.max(revenueAllTime, eaAllTime, costs, allNolInvestment, 1) * 100) + '%' }} /></div></div>
-          <div className="finance-bar-row"><div><span>Investimento device NOL visibile</span><strong>{money(allNolInvestment)}</strong></div><div className="finance-bar-track"><span className="blue" style={{ width: Math.min(100, allNolInvestment / Math.max(revenueAllTime, eaAllTime, costs, allNolInvestment, 1) * 100) + '%' }} /></div></div>
+          <div className="finance-bar-row"><div><span>Ricavi NOL storici</span><strong>{money(revenueAllTime)}</strong></div><div className="finance-bar-track"><span className="green" style={{ width: Math.min(100, revenueAllTime / Math.max(revenueAllTime, costs, allNolInvestment, 1) * 100) + '%' }} /></div></div>
+          <div className="finance-bar-row"><div><span>Costi registrati</span><strong>{money(costs)}</strong></div><div className="finance-bar-track"><span className="amber" style={{ width: Math.min(100, costs / Math.max(revenueAllTime, costs, allNolInvestment, 1) * 100) + '%' }} /></div></div>
+          <div className="finance-bar-row"><div><span>Investimento device NOL visibile</span><strong>{money(allNolInvestment)}</strong></div><div className="finance-bar-track"><span className="blue" style={{ width: Math.min(100, allNolInvestment / Math.max(revenueAllTime, costs, allNolInvestment, 1) * 100) + '%' }} /></div></div>
         </div>
-        <div className="finance-balance-card"><span>Saldo NOL dei soli device attivati (escluso EA)</span><strong className={Number(finance?.nol_balance || 0) >= 0 ? 'positive' : 'negative'}>{money(finance?.nol_balance)}</strong><small>Esclude i canoni globali EA, mostrati separatamente, e non attribuisce ricavi NOL a device ancora da attivare.</small></div>
+        <div className="finance-balance-card"><span>Saldo NOL dei soli device attivati</span><strong className={Number(finance?.nol_balance || 0) >= 0 ? 'positive' : 'negative'}>{money(finance?.nol_balance)}</strong><small>Non attribuisce ricavi NOL a device ancora da attivare.</small></div>
       </section>
     </div>
 
