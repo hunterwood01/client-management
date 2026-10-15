@@ -41,7 +41,7 @@ export default function FinanceDashboard({ finance, branches = [], devices = [],
       <Metric label="Canoni EA · totale storico" value={money(eaAllTime)} caption="Canoni globali maturati nel periodo" icon="€" tone="violet" />
       <Metric label="Investimento device NOL" value={money(allNolInvestment)} caption="Costo registrato dei device NOL visibili" icon="▣" tone="blue" />
       <Metric label="Costi complessivi" value={money(costs)} caption="Hardware, licenze e altri costi registrati" icon="↘" tone="amber" />
-      <Metric label="Margine complessivo" value={money(margin)} caption="Ricavi e canoni meno costi registrati" icon="↗" tone={margin >= 0 ? 'green' : 'red'} />
+      <Metric label="Margine complessivo · include EA" value={money(margin)} caption="Canoni globali EA + ricavi device − costi registrati" icon="↗" tone={margin >= 0 ? 'green' : 'red'} />
       <Metric label="Device in stato guasto" value={String(faultCount)} caption="Apparati da gestire" icon="!" tone={faultCount ? 'red' : 'green'} />
     </div>
 
@@ -54,7 +54,7 @@ export default function FinanceDashboard({ finance, branches = [], devices = [],
           <div className="finance-bar-row"><div><span>Costi registrati</span><strong>{money(costs)}</strong></div><div className="finance-bar-track"><span className="amber" style={{ width: Math.min(100, costs / Math.max(revenueAllTime, eaAllTime, costs, allNolInvestment, 1) * 100) + '%' }} /></div></div>
           <div className="finance-bar-row"><div><span>Investimento device NOL visibile</span><strong>{money(allNolInvestment)}</strong></div><div className="finance-bar-track"><span className="blue" style={{ width: Math.min(100, allNolInvestment / Math.max(revenueAllTime, eaAllTime, costs, allNolInvestment, 1) * 100) + '%' }} /></div></div>
         </div>
-        <div className="finance-balance-card"><span>Saldo dei soli device NOL attivati</span><strong className={Number(finance?.nol_balance || 0) >= 0 ? 'positive' : 'negative'}>{money(finance?.nol_balance)}</strong><small>Esclude i canoni globali EA, mostrati separatamente, e non attribuisce ricavi NOL a device ancora da attivare.</small></div>
+        <div className="finance-balance-card"><span>Saldo NOL dei soli device attivati (escluso EA)</span><strong className={Number(finance?.nol_balance || 0) >= 0 ? 'positive' : 'negative'}>{money(finance?.nol_balance)}</strong><small>Esclude i canoni globali EA, mostrati separatamente, e non attribuisce ricavi NOL a device ancora da attivare.</small></div>
       </section>
     </div>
 
