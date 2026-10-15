@@ -704,7 +704,7 @@ export default function App() {
 
   async function deletePurchaseProfile(profile) {
     const label = [profile.manufacturer, profile.model_name, profile.reference].filter(Boolean).join(' · ');
-    if (!window.confirm('Vuoi eliminare l’ordine "' + label + '"? Il carico residuo verrà stornato. Gli ordini con device già assegnati o utilizzati non possono essere eliminati.')) return;
+    if (!window.confirm('Vuoi eliminare l’ordine "' + label + '"? I device già censiti e presenti a magazzino resteranno nell’inventario; verrà stornata solo la quantità residua non rappresentata da device. Gli ordini con device assegnati a una filiale o già utilizzati non possono essere eliminati.')) return;
     setBusy(true); setError(''); setSuccess('');
     try {
       await api('/purchase-profiles/' + profile.id, { method: 'DELETE' });
