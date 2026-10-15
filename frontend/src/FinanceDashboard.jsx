@@ -12,39 +12,9 @@ function SectionHeading({ title, subtitle, action }) {
   return <div className="finance-section-heading"><div><h3>{title}</h3>{subtitle && <p>{subtitle}</p>}</div>{action}</div>;
 }
 
-function downloadFinanceCsv(rows) {
-  const columns = [
-    ['Filiale', row => row.name], ['Dispositivi', row => row.count], ['Device NOL', row => row.nolCount],
-    ['Costo hardware NOL', row => row.investment], ['Canoni mensili NOL', row => row.monthly]
-  ];
-  const quote = value => '"' + String(value ?? '').replace(/"/g, '""') + '"';
-  const csv = [columns.map(([label]) => quote(label)).join(';'), ...rows.map(row => columns.map(([, get]) => quote(get(row))).join(';'))].join('\r\n');
-  const url = URL.createObjectURL(new Blob(['\uFEFF', csv], { type: 'text/csv;charset=utf-8' }));
-  const link = document.createElement('a'); link.href = url; link.download = 'finance-filiali.csv'; link.click(); URL.revokeObjectURL(url);
-}
 
 export default function FinanceDashboard({ finance, branches = [], devices = [], branchFilter = 'all' }) {
-  const branchRows = useMemo(() => {
-    const grouped = new Map();
-    for (const device of devices) {
-      if (!device.branch_id) continue;
-      const key = String(device.branch_id);
-      const row = grouped.get(key) || {
-        id: key,
-        name: [device.company_name, device.branch_nomenclature || device.branch_name || device.branch_street].filter(Boolean).join(' · ') || ('Filiale #' + key),
-        count: 0, nolCount: 0, investment: 0, monthly: 0, faults: 0
-      };
-      row.count += 1;
-      if (device.ownership_type === 'rental') {
-        row.nolCount += 1;
-        row.investment += Number(device.purchase_cost || 0);
-        row.monthly += Number(device.monthly_fee || 0);
-      }
-      if (device.status === 'fault') row.faults += 1;
-      grouped.set(key, row);
-    }
-    return [...grouped.values()].sort((a, b) => a.name.localeCompare(b.name, 'it'));
-  }, [devices]);
+
 
   const allNolInvestment = useMemo(() => devices.filter(d => d.ownership_type === 'rental').reduce((sum, d) => sum + Number(d.purchase_cost || 0), 0), [devices]);
   const activeNolMonthly = Number(finance?.nol_current_month || 0);
@@ -55,13 +25,11 @@ export default function FinanceDashboard({ finance, branches = [], devices = [],
   const selectedLabel = selectedBranch ? [selectedBranch.company_name, selectedBranch.nomenclature || selectedBranch.street].filter(Boolean).join(' · ') : 'Tutte le filiali';
   const faultCount = devices.filter(d => d.status === 'fault').length;
   const stockCount = devices.filter(d => d.status === 'in_stock').length;
-  const maxInvestment = Math.max(1, ...branchRows.map(row => row.investment));
-  const maxMonthly = Math.max(1, ...branchRows.map(row => row.monthly));
 
   return <section className="page-content finance-dashboard">
     <div className="page-intro finance-page-intro">
       <div><p className="eyebrow">PANORAMICA ECONOMICA</p><h2>Finance</h2><p className="muted">Investimenti, ricavi NOL, margini e costi operativi del parco device.</p></div>
-      <div className="finance-intro-actions"><span className="soft-tag">{selectedLabel}</span><button className="secondary-button" onClick={() => downloadFinanceCsv(branchRows)}>Esporta riepilogo</button></div>
+      <div className="finance-intro-actions"><span className="soft-tag">{selectedLabel}</span></div>
     </div>
 
     <div className="finance-metrics-grid">
@@ -74,11 +42,6 @@ export default function FinanceDashboard({ finance, branches = [], devices = [],
     </div>
 
     <div className="finance-dashboard-grid">
-      <section className="panel finance-panel">
-        <SectionHeading title="Riepilogo per filiale" subtitle="Investimento NOL e canoni mensili per le filiali con device assegnati." action={<button className="text-button" onClick={() => downloadFinanceCsv(branchRows)}>Esporta CSV →</button>} />
-        {branchRows.length ? <div className="table-panel finance-nested-table"><table><thead><tr><th>Filiale</th><th>Device</th><th>Device NOL</th><th>Investimento NOL</th><th>Canoni mensili</th><th>Guasti aperti</th></tr></thead><tbody>{branchRows.map(row => <tr key={row.id}><td><strong>{row.name}</strong></td><td>{row.count}</td><td>{row.nolCount}</td><td>{money(row.investment)}</td><td>{money(row.monthly)}</td><td><span className={'finance-fault-count ' + (row.faults ? 'has-faults' : '')}>{row.faults}</span></td></tr>)}</tbody><tfoot><tr><th>Totale visibile</th><th>{branchRows.reduce((sum, r) => sum + r.count, 0)}</th><th>{branchRows.reduce((sum, r) => sum + r.nolCount, 0)}</th><th>{money(branchRows.reduce((sum, r) => sum + r.investment, 0))}</th><th>{money(branchRows.reduce((sum, r) => sum + r.monthly, 0))}</th><th>{branchRows.reduce((sum, r) => sum + r.faults, 0)}</th></tr></tfoot></table></div> : <div className="finance-empty"><strong>Nessun dato per questa selezione</strong><span>Assegna un device a una filiale per visualizzarlo qui.</span></div>}
-      </section>
-
       <section className="panel finance-panel">
         <SectionHeading title="Andamento economico" subtitle="Indicatori disponibili dal servizio Finance." />
         <div className="finance-bars">
