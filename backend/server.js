@@ -781,7 +781,8 @@ app.post('/devices/:id/fault-events', requireRole('admin', 'technician', 'wareho
   const outcome = req.body?.outcome || 'pending';
   const rmaNumber = cleanString(req.body?.rma_number, 120);
   const rmaStatus = cleanString(req.body?.rma_status, 40);
-  const replacementId = req.body?.replacement_device_id ? parseId(req.body.replacement_device_id) : null;
+  let replacementId = req.body?.replacement_device_id ? parseId(req.body.replacement_device_id) : null;
+  const replacementStockModelId = req.body?.replacement_stock_model_id ? parseId(req.body.replacement_stock_model_id) : null;
   const replacementLocationId = req.body?.replacement_stock_location_id ? parseId(req.body.replacement_stock_location_id) : null;
   const additionalCost = Number(req.body?.additional_cost || 0);
   const costDescription = cleanString(req.body?.cost_description, 300);
@@ -789,13 +790,29 @@ app.post('/devices/:id/fault-events', requireRole('admin', 'technician', 'wareho
   if (!deviceId || !/^\d{4}-\d{2}-\d{2}$/.test(faultDate) || !description || [rmaNumber, rmaStatus, costDescription, notes].includes(undefined)) return fail(res, 400, 'Data, descrizione o campi non validi.');
   if (!['pending','rma','sci','resolved'].includes(outcome) || !Number.isFinite(additionalCost) || additionalCost < 0) return fail(res, 400, 'Esito o costo aggiuntivo non valido.');
   if (req.body?.replacement_device_id && !replacementId) return fail(res, 400, 'Device sostitutivo non valido.');
+  if (req.body?.replacement_stock_model_id && !replacementStockModelId) return fail(res, 400, 'Modello di magazzino non valido.');
+  if (replacementStockModelId && (!replacementLocationId || outcome === 'sci')) return fail(res, 400, 'Per prelevare un sostitutivo seleziona un magazzino e un esito diverso da SCI.');
   if (req.body?.replacement_stock_location_id && !replacementLocationId) return fail(res, 400, 'Magazzino sostitutivo non valido.');
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    const original = await client.query('SELECT * FROM devices WHERE id=$1 FOR UPDATE', [deviceId]);
+    const original = await client.query('SELECT d.*, m.default_purchase_cost, m.default_monthly_fee FROM devices d JOIN device_models m ON m.id=d.model_id WHERE d.id=$1 FOR UPDATE OF d', [deviceId]);
     if (!original.rowCount) { await client.query('ROLLBACK'); return fail(res, 404, 'Dispositivo non trovato.'); }
-    if (replacementId) {
+    let replacementHardwareCost = 0;
+    if (replacementStockModelId) {
+      if (original.rows[0].ownership_type !== 'rental') { await client.query('ROLLBACK'); return fail(res, 400, 'Il prelievo da giacenza per il costo hardware è previsto per device NOL.'); }
+      if (String(replacementStockModelId) !== String(original.rows[0].model_id)) { await client.query('ROLLBACK'); return fail(res, 409, 'Il materiale sostitutivo deve essere dello stesso modello del device guasto.'); }
+    }
+    if (replacementStockModelId) {
+      const stock = await client.query('SELECT ps.quantity, COALESCE((SELECT SUM(COALESCE(pp.unit_cost,0)*pp.quantity)/NULLIF(SUM(pp.quantity),0) FROM purchase_profiles pp WHERE pp.device_model_id=ps.device_model_id AND pp.stock_location_id=ps.stock_location_id), dm.default_purchase_cost, 0)::numeric AS unit_cost FROM product_stock ps JOIN device_models dm ON dm.id=ps.device_model_id WHERE ps.device_model_id=$1 AND ps.stock_location_id=$2 FOR UPDATE OF ps', [replacementStockModelId, replacementLocationId]);
+      if (!stock.rowCount || Number(stock.rows[0].quantity) < 1) { await client.query('ROLLBACK'); return fail(res, 409, 'Nessuna giacenza disponibile nel magazzino selezionato.'); }
+      replacementHardwareCost = Number(stock.rows[0].unit_cost || 0);
+      await client.query('UPDATE product_stock SET quantity=quantity-1, updated_at=NOW() WHERE device_model_id=$1 AND stock_location_id=$2', [replacementStockModelId, replacementLocationId]);
+      await client.query("INSERT INTO product_stock_movements(device_model_id,stock_location_id,quantity_delta,movement_type,notes,moved_by) VALUES($1,$2,-1,'activation',$3,$4)", [replacementStockModelId, replacementLocationId, 'Sostituzione device guasto #' + deviceId, req.user.id]);
+      const replacement = await client.query("INSERT INTO devices(model_id,branch_id,stock_location_id,status,ownership_type,purchase_cost,monthly_fee,stock_consumed,notes) VALUES($1,$2,$3,'to_activate','rental',$4,$5,TRUE,$6) RETURNING id", [replacementStockModelId, original.rows[0].branch_id, replacementLocationId, replacementHardwareCost, original.rows[0].monthly_fee ?? original.rows[0].default_monthly_fee ?? null, 'Sostitutivo da magazzino per guasto device #' + deviceId]);
+      replacementId = replacement.rows[0].id;
+    }
+    if (replacementId && !replacementStockModelId) {
       const replacement = await client.query('SELECT * FROM devices WHERE id=$1 FOR UPDATE', [replacementId]);
       if (!replacement.rowCount || replacement.rows[0].status !== 'in_stock' || String(replacement.rows[0].model_id) !== String(original.rows[0].model_id)) {
         await client.query('ROLLBACK'); return fail(res, 409, 'Il sostitutivo deve essere a magazzino e dello stesso modello.');
@@ -806,9 +823,9 @@ app.post('/devices/:id/fault-events', requireRole('admin', 'technician', 'wareho
       await client.query("UPDATE devices SET branch_id=$1, status='to_activate', updated_at=NOW() WHERE id=$2", [original.rows[0].branch_id, replacementId]);
     }
     const inserted = await client.query(
-      `INSERT INTO device_fault_events(device_id,branch_id,fault_date,description,outcome,rma_number,rma_status,replacement_device_id,replacement_stock_location_id,additional_cost,cost_description,notes,created_by,status,closed_at)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,CASE WHEN $14='closed' THEN NOW() ELSE NULL END) RETURNING *`,
-      [deviceId, original.rows[0].branch_id, faultDate, description, outcome, rmaNumber, rmaStatus, replacementId, replacementLocationId, additionalCost, costDescription, notes, req.user.id, (outcome === 'resolved' || outcome === 'sci') ? 'closed' : 'open']);
+      `INSERT INTO device_fault_events(device_id,branch_id,fault_date,description,outcome,rma_number,rma_status,replacement_device_id,replacement_stock_location_id,additional_cost,cost_description,notes,created_by,status,closed_at,replacement_hardware_cost)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,CASE WHEN $14='closed' THEN NOW() ELSE NULL END,$15) RETURNING *`,
+      [deviceId, original.rows[0].branch_id, faultDate, description, outcome, rmaNumber, rmaStatus, replacementId, replacementLocationId, additionalCost, costDescription, notes, req.user.id, (outcome === 'resolved' || outcome === 'sci') ? 'closed' : 'open', replacementHardwareCost]);
     await client.query("UPDATE devices SET status=$1, updated_at=NOW() WHERE id=$2", [outcome === 'sci' ? 'decommissioned' : (outcome === 'resolved' ? 'operational' : 'fault'), deviceId]);
     await client.query('COMMIT');
     res.status(201).json({ data: inserted.rows[0] });
@@ -1170,6 +1187,7 @@ app.get('/product-stock',async(_req,res,next)=>{
  try{
   const result=await pool.query(`
    SELECT ps.*,m.sku,m.manufacturer,m.model_name,sl.name AS stock_location_name,
+    COALESCE((SELECT SUM(COALESCE(pp.unit_cost,0)*pp.quantity)/NULLIF(SUM(pp.quantity),0) FROM purchase_profiles pp WHERE pp.device_model_id=ps.device_model_id AND pp.stock_location_id=ps.stock_location_id),m.default_purchase_cost,0)::numeric AS average_unit_cost,
     GREATEST(0,ps.quantity-COALESCE(untracked.quantity,0))::int AS available_quantity,
     (ps.quantity+COALESCE(consumed.quantity,0))::int AS total_quantity
    FROM product_stock ps
