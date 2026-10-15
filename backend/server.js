@@ -562,15 +562,19 @@ app.get('/branches/:id/company-history', async (req, res, next) => {
 
 app.post('/branches/:id/company-history/manual', requireRole('admin', 'technician'), async (req, res, next) => {
   const branchId = parseId(req.params.id);
-  const companyName = cleanString(req.body?.company_name, 200);
+  const companyId = parseId(req.body?.company_id);
   if (!branchId) return fail(res, 400, 'ID filiale non valido.');
-  if (companyName === undefined || !companyName) return fail(res, 400, 'Inserire una ragione sociale precedente valida (massimo 200 caratteri).');
+  if (!companyId) return fail(res, 400, 'Selezionare una ragione sociale presente in Amministrazione.');
   try {
-    const exists = await pool.query('SELECT id FROM branches WHERE id = $1', [branchId]);
-    if (!exists.rowCount) return fail(res, 404, 'Filiale non trovata.');
+    const [branch, company] = await Promise.all([
+      pool.query('SELECT id FROM branches WHERE id = $1', [branchId]),
+      pool.query('SELECT id, legal_name FROM companies WHERE id = $1', [companyId])
+    ]);
+    if (!branch.rowCount) return fail(res, 404, 'Filiale non trovata.');
+    if (!company.rowCount) return fail(res, 400, 'La ragione sociale selezionata non esiste più in Amministrazione.');
     const result = await pool.query(
-      'INSERT INTO branch_previous_company_names (branch_id, company_name, created_by) VALUES ($1, $2, $3) RETURNING id, branch_id, company_name, created_by, created_at',
-      [branchId, companyName, req.user.display_name || req.user.username]
+      'INSERT INTO branch_previous_company_names (branch_id, company_id, company_name, created_by) VALUES ($1, $2, $3, $4) RETURNING id, branch_id, company_id, company_name, created_by, created_at',
+      [branchId, companyId, company.rows[0].legal_name, req.user.display_name || req.user.username]
     );
     res.status(201).json({ data: { ...result.rows[0], type: 'manual' } });
   } catch (error) { next(error); }
