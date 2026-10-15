@@ -1706,9 +1706,22 @@ app.get('/finance/dashboard',async(req,res,next)=>{
  ), branch_counts AS (
   SELECT month_start,COUNT(*) FILTER(WHERE is_active)::numeric AS active_count
   FROM branch_month_activity GROUP BY month_start
+ ), nol_source AS (
+  SELECT h.device_id,h.branch_id,h.activated_on,h.deactivated_on,h.monthly_fee,h.purchase_cost
+  FROM device_nol_history h
+  WHERE ($1::bigint IS NULL OR h.branch_id=$1)
+  UNION ALL
+  -- Older NOL devices may predate device_nol_history; use their current device record as a fallback.
+  SELECT d.id AS device_id,d.branch_id,COALESCE(d.activated_on,d.installed_on) AS activated_on,
+   d.deactivated_on,d.monthly_fee,d.purchase_cost
+  FROM devices d
+  WHERE d.ownership_type='rental' AND d.branch_id IS NOT NULL
+   AND COALESCE(d.activated_on,d.installed_on) IS NOT NULL
+   AND ($1::bigint IS NULL OR d.branch_id=$1)
+   AND NOT EXISTS (SELECT 1 FROM device_nol_history h WHERE h.device_id=d.id)
  ), nol AS (
-  SELECT h.*,GREATEST(0,EXTRACT(YEAR FROM age(COALESCE(h.deactivated_on,CURRENT_DATE),h.activated_on))::int*12+EXTRACT(MONTH FROM age(COALESCE(h.deactivated_on,CURRENT_DATE),h.activated_on))::int) AS complete_months
-  FROM device_nol_history h WHERE ($1::bigint IS NULL OR h.branch_id=$1)
+  SELECT n.*,GREATEST(0,EXTRACT(YEAR FROM age(COALESCE(n.deactivated_on,CURRENT_DATE),n.activated_on))::int*12+EXTRACT(MONTH FROM age(COALESCE(n.deactivated_on,CURRENT_DATE),n.activated_on))::int) AS complete_months
+  FROM nol_source n
  ), totals AS (
   SELECT COALESCE(SUM(monthly_fee*complete_months),0)::numeric AS nol_all_time,
    COALESCE(SUM(CASE WHEN complete_months>0 AND activated_on<(date_trunc('month',CURRENT_DATE)+INTERVAL '1 month')::date AND COALESCE(deactivated_on,CURRENT_DATE)>=date_trunc('month',CURRENT_DATE)::date THEN monthly_fee ELSE 0 END),0)::numeric AS nol_current_month,
