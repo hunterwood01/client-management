@@ -22,7 +22,7 @@ export default function FinanceDashboard({ finance, branches = [], devices = [],
   const costs = Number(finance?.total_costs || 0);
   const margin = Number(finance?.overall_margin || 0);
   const selectedBranch = branchFilter === 'all' ? null : branches.find(b => String(b.id) === String(branchFilter));
-  const selectedLabel = selectedBranch ? [selectedBranch.company_name, selectedBranch.nomenclature || selectedBranch.street].filter(Boolean).join(' · ') : 'Tutte le filiali';
+  const selectedLabel = selectedBranch ? [selectedBranch.company_name, selectedBranch.country, selectedBranch.street].filter(Boolean).join(' - ') : 'Tutte le filiali';
   const faultCount = devices.filter(d => d.status === 'fault').length;
   const stockCount = devices.filter(d => d.status === 'in_stock').length;
 
