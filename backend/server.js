@@ -666,9 +666,35 @@ app.put('/purchase-profiles/:id', requireRole('admin'), async (req, res, next) =
 
     const newLocationId = stockLocationId;
     const locationChanged = String(order.stock_location_id || '') !== String(newLocationId || '');
-    if (locationChanged) {
+    if (locationChanged && quantity !== oldQuantity) {
       await client.query('ROLLBACK');
       return fail(res, 409, 'Per sicurezza, modifica prima la quantità dell’ordine; lo spostamento di magazzino va eseguito separatamente.');
+    }
+    if (locationChanged && quantity === oldQuantity) {
+      const transferable = Math.min(oldQuantity - usedCount, Number((await client.query(
+        'SELECT quantity FROM product_stock WHERE device_model_id = $1 AND stock_location_id = $2 FOR UPDATE',
+        [order.device_model_id, order.stock_location_id]
+      )).rows[0]?.quantity || 0));
+      if (order.stock_location_id && transferable > 0) {
+        await client.query(
+          'UPDATE product_stock SET quantity = quantity - $1, updated_at = NOW() WHERE device_model_id = $2 AND stock_location_id = $3',
+          [transferable, order.device_model_id, order.stock_location_id]
+        );
+        await client.query(
+          "INSERT INTO product_stock_movements(device_model_id, stock_location_id, quantity_delta, movement_type, purchase_profile_id, notes, moved_by) VALUES ($1,$2,$3,'adjustment',$4,$5,$6)",
+          [order.device_model_id, order.stock_location_id, -transferable, id, 'Spostamento carico ordine ' + (reference || order.reference || id), req.user.id]
+        );
+      }
+      if (newLocationId && transferable > 0) {
+        await client.query(
+          'INSERT INTO product_stock(device_model_id, stock_location_id, quantity) VALUES ($1,$2,$3) ON CONFLICT(device_model_id, stock_location_id) DO UPDATE SET quantity = product_stock.quantity + EXCLUDED.quantity, updated_at = NOW()',
+          [order.device_model_id, newLocationId, transferable]
+        );
+        await client.query(
+          "INSERT INTO product_stock_movements(device_model_id, stock_location_id, quantity_delta, movement_type, purchase_profile_id, notes, moved_by) VALUES ($1,$2,$3,'adjustment',$4,$5,$6)",
+          [order.device_model_id, newLocationId, transferable, id, 'Riassegnazione ordine ' + (reference || order.reference || id), req.user.id]
+        );
+      }
     }
 
     if (reduction > 0 && order.stock_location_id) {
