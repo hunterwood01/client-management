@@ -711,20 +711,24 @@ app.delete('/purchase-profiles/:id', requireRole('admin'), async (req, res, next
     }
     const order = found.rows[0];
     const linkedDevices = await client.query(
-      "SELECT COUNT(*)::int AS count FROM devices WHERE purchase_profile_id = $1 AND (branch_id IS NOT NULL OR stock_consumed = TRUE OR status NOT IN ('in_stock','to_activate'))",
-      [id]
+      "SELECT COUNT(*) FILTER (WHERE branch_id IS NOT NULL OR status NOT IN ('in_stock','to_activate'))::int AS used_count, COUNT(*) FILTER (WHERE branch_id IS NULL AND status IN ('in_stock','to_activate') AND (stock_location_id = $2 OR stock_location_id IS NULL))::int AS warehouse_count FROM devices WHERE purchase_profile_id = $1",
+      [id, order.stock_location_id]
     );
-    if (linkedDevices.rows[0].count > 0) {
+    if (linkedDevices.rows[0].used_count > 0) {
       await client.query('ROLLBACK');
-      return fail(res, 409, 'Impossibile eliminare l’ordine: almeno un device collegato è assegnato o ha già avuto movimenti di utilizzo.');
+      return fail(res, 409, 'Impossibile eliminare l’ordine: almeno un device collegato è assegnato a una filiale o non è più disponibile a magazzino.');
     }
+    const warehouseDeviceCount = Number(linkedDevices.rows[0].warehouse_count || 0);
     await client.query('UPDATE devices SET purchase_profile_id = NULL WHERE purchase_profile_id = $1', [id]);
     if (order.stock_location_id && Number(order.quantity || 0) > 0) {
       const currentStock = await client.query(
         'SELECT quantity FROM product_stock WHERE device_model_id = $1 AND stock_location_id = $2 FOR UPDATE',
         [order.device_model_id, order.stock_location_id]
       );
-      const availableToReverse = Math.min(Number(order.quantity), Number(currentStock.rows[0]?.quantity || 0));
+      // Keep the stock quantity needed to represent the physical devices that remain
+      // in this warehouse; reverse only the untracked remainder of the order.
+      const untrackedOrderQuantity = Math.max(0, Number(order.quantity) - warehouseDeviceCount);
+      const availableToReverse = Math.min(untrackedOrderQuantity, Number(currentStock.rows[0]?.quantity || 0));
       if (availableToReverse > 0) {
         await client.query(
           'UPDATE product_stock SET quantity = quantity - $1, updated_at = NOW() WHERE device_model_id = $2 AND stock_location_id = $3',
