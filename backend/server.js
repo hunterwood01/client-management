@@ -814,14 +814,32 @@ app.post('/devices/:id/fault-events', requireRole('admin', 'technician', 'wareho
       replacementId = replacement.rows[0].id;
     }
     if (replacementId && !replacementStockModelId) {
-      const replacement = await client.query('SELECT * FROM devices WHERE id=$1 FOR UPDATE', [replacementId]);
-      if (!replacement.rowCount || replacement.rows[0].status !== 'in_stock' || String(replacement.rows[0].model_id) !== String(original.rows[0].model_id)) {
-        await client.query('ROLLBACK'); return fail(res, 409, 'Il sostitutivo deve essere a magazzino e dello stesso modello.');
+      const replacement = await client.query(
+        'SELECT d.*, dm.default_purchase_cost, pp.unit_cost AS profile_unit_cost FROM devices d JOIN device_models dm ON dm.id=d.model_id LEFT JOIN purchase_profiles pp ON pp.id=d.purchase_profile_id WHERE d.id=$1 FOR UPDATE OF d',
+        [replacementId]
+      );
+      if (!replacement.rowCount || replacement.rows[0].status !== 'in_stock' || replacement.rows[0].branch_id || replacement.rows[0].stock_consumed === true) {
+        await client.query('ROLLBACK'); return fail(res, 409, 'Il sostitutivo selezionato non è più disponibile a magazzino.');
       }
-      if (replacementLocationId && String(replacement.rows[0].stock_location_id) !== String(replacementLocationId)) {
+      if (!replacementLocationId || String(replacement.rows[0].stock_location_id || '') !== String(replacementLocationId)) {
         await client.query('ROLLBACK'); return fail(res, 409, 'Il sostitutivo non appartiene al magazzino selezionato.');
       }
-      await client.query("UPDATE devices SET branch_id=$1, status='to_activate', updated_at=NOW() WHERE id=$2", [original.rows[0].branch_id, replacementId]);
+      replacementHardwareCost = Number(replacement.rows[0].purchase_cost || replacement.rows[0].profile_unit_cost || replacement.rows[0].default_purchase_cost || 0);
+      const stock = await client.query(
+        'UPDATE product_stock SET quantity=quantity-1, updated_at=NOW() WHERE device_model_id=$1 AND stock_location_id=$2 AND quantity > 0 RETURNING quantity',
+        [replacement.rows[0].model_id, replacementLocationId]
+      );
+      if (!stock.rowCount) {
+        await client.query('ROLLBACK'); return fail(res, 409, 'La giacenza del modello selezionato è esaurita o non è sincronizzata con i device censiti.');
+      }
+      await client.query(
+        "INSERT INTO product_stock_movements(device_model_id,stock_location_id,quantity_delta,movement_type,device_id,notes,moved_by) VALUES($1,$2,-1,'activation',$3,$4,$5)",
+        [replacement.rows[0].model_id, replacementLocationId, replacementId, 'Sostituzione device guasto #' + deviceId, req.user.id]
+      );
+      await client.query(
+        "UPDATE devices SET branch_id=$1, status='to_activate', stock_consumed=TRUE, updated_at=NOW() WHERE id=$2",
+        [original.rows[0].branch_id, replacementId]
+      );
     }
     const inserted = await client.query(
       `INSERT INTO device_fault_events(device_id,branch_id,fault_date,description,outcome,rma_number,rma_status,replacement_device_id,replacement_stock_location_id,additional_cost,cost_description,notes,created_by,status,closed_at,replacement_hardware_cost)
