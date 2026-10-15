@@ -367,3 +367,33 @@ tbody tr:hover td { background: color-mix(in srgb, var(--surface-soft) 72%, tran
 
 /* Keep each child legal entity on its own line without widening the companies table. */
 .company-children-cell { min-width: 160px; max-width: 230px; white-space: pre-line; overflow-wrap: anywhere; line-height: 1.5; }
+
+
+/* Device NOL amortization */
+.amortization-status { display: inline-flex; align-items: center; gap: 6px; font-size: 10px; font-weight: 700; white-space: nowrap; }
+.amortization-status small { color: var(--muted); font-size: 9px; margin-left: 2px; }
+.amortization-light { display: inline-block; width: 8px; height: 8px; flex: 0 0 8px; border-radius: 50%; background: #98a2b3; }
+.amortization-light.complete { background: #16a34a; box-shadow: 0 0 0 3px rgb(22 163 74 / 14%); }
+.amortization-light.incomplete { background: #dc2626; box-shadow: 0 0 0 3px rgb(220 38 38 / 12%); }
+.amortization-light.unknown { background: #98a2b3; }
+.device-modal-tabs { margin: -3px 0 2px; }
+.device-amortization-panel { padding: 18px; }
+.amortization-badge { display: inline-flex; align-items: center; border-radius: 999px; padding: 6px 10px; font-size: 10px; font-weight: 750; white-space: nowrap; }
+.amortization-badge.complete { color: #15803d; background: #dcfce7; }
+.amortization-badge.incomplete { color: #b91c1c; background: #fee2e2; }
+.amortization-metrics { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 16px 0 20px; }
+.amortization-metrics > div { display: flex; flex-direction: column; gap: 6px; padding: 13px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+.amortization-metrics span { color: var(--muted); font-size: 10px; }
+.amortization-metrics strong { font-size: 15px; }
+.amortization-progress-heading, .amortization-progress-caption { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.amortization-progress-heading { margin-bottom: 8px; font-size: 11px; }
+.amortization-progress { height: 10px; overflow: hidden; border-radius: 999px; background: var(--surface-soft); }
+.amortization-progress > div { height: 100%; border-radius: inherit; transition: width .25s ease; }
+.amortization-progress > div.complete { background: #16a34a; }
+.amortization-progress > div.incomplete { background: #dc2626; }
+.amortization-progress-caption { margin-top: 8px; color: var(--muted); font-size: 10px; flex-wrap: wrap; }
+.amortization-dates { margin-top: 18px; }
+@media (max-width: 640px) {
+  .amortization-metrics { grid-template-columns: 1fr 1fr; }
+  .amortization-progress-caption { align-items: flex-start; flex-direction: column; }
+}
