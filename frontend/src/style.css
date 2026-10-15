@@ -479,3 +479,21 @@ tbody tr:hover td { background: color-mix(in srgb, var(--surface-soft) 72%, tran
   .finance-panel { padding: 13px; }
   .finance-fault-summary { grid-template-columns: 1fr 1fr; }
 }
+
+/* Device fault workflow and dashboard navigation */
+.stat-card-clickable { cursor: pointer; transition: transform .15s ease, box-shadow .15s ease; }
+.stat-card-clickable:hover { transform: translateY(-2px); box-shadow: var(--shadow-md, 0 8px 24px rgba(20, 35, 60, .10)); }
+.stat-card-clickable:focus-visible, .activity-row-clickable:focus-visible { outline: 2px solid var(--accent, #2563eb); outline-offset: 3px; }
+.activity-row-clickable { width: 100%; border: 0; background: transparent; color: inherit; text-align: left; font: inherit; cursor: pointer; }
+.device-status-filter { display: flex; align-items: center; gap: 8px; color: var(--muted, #64748b); font-size: 13px; }
+.device-status-filter select { min-height: 38px; border: 1px solid var(--border, #dbe2ea); border-radius: 8px; padding: 0 10px; background: var(--surface, #fff); color: inherit; }
+.fault-management-modal { width: min(1120px, calc(100vw - 32px)); max-height: calc(100vh - 32px); overflow: auto; }
+.fault-management-layout { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, .9fr); gap: 16px; padding: 0 24px 24px; }
+.fault-management-layout > .panel { min-width: 0; padding: 16px; }
+.fault-event-list { display: grid; gap: 12px; }
+.fault-event { border: 1px solid var(--border, #dbe2ea); border-radius: 10px; padding: 12px; display: grid; gap: 8px; }
+.fault-event p { margin: 0; white-space: pre-wrap; }
+.fault-event small { color: var(--muted, #64748b); }
+.fault-event-heading, .fault-event-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.fault-event-footer { border-top: 1px solid var(--border, #dbe2ea); padding-top: 8px; font-size: 13px; }
+@media (max-width: 900px) { .fault-management-layout { grid-template-columns: 1fr; padding: 0 16px 16px; } .fault-management-modal { width: calc(100vw - 16px); max-height: calc(100vh - 16px); } }
