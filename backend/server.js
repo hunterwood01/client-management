@@ -822,7 +822,7 @@ app.post('/devices/:id/fault-events', requireRole('admin', 'technician', 'wareho
         'SELECT d.*, dm.default_purchase_cost, pp.unit_cost AS profile_unit_cost FROM devices d JOIN device_models dm ON dm.id=d.model_id LEFT JOIN purchase_profiles pp ON pp.id=d.purchase_profile_id WHERE d.id=$1 FOR UPDATE OF d',
         [replacementId]
       );
-      if (!replacement.rowCount || replacement.rows[0].status !== 'in_stock' || replacement.rows[0].branch_id || replacement.rows[0].stock_consumed === true) {
+      if (!replacement.rowCount || !['in_stock', 'to_activate'].includes(replacement.rows[0].status) || replacement.rows[0].branch_id || replacement.rows[0].stock_consumed === true) {
         await client.query('ROLLBACK'); return fail(res, 409, 'Il sostitutivo selezionato non è più disponibile a magazzino.');
       }
       if (!replacementLocationId || String(replacement.rows[0].stock_location_id || '') !== String(replacementLocationId)) {
@@ -958,6 +958,20 @@ app.post('/devices', requireRole('admin', 'technician', 'warehouse'), async (req
       [modelId, branchId, stockLocationId, purchaseProfileId, assetTag, serial, status, ownership, cost, fee, purchased, activated, installed, notes]
     );
     await consumeDeviceStock(client, result.rows[0], branchId, status, req.user.id);
+    // A manually censused physical device is not part of an order's aggregate
+    // quantity. Add it to the stock ledger so warehouse quantities and fault
+    // replacement availability stay in sync. Order-linked devices are already
+    // represented by the quantity loaded when the purchase order was recorded.
+    if (!purchaseProfileId && !branchId && ['in_stock', 'to_activate'].includes(status) && stockLocationId) {
+      await client.query(
+        'INSERT INTO product_stock(device_model_id, stock_location_id, quantity) VALUES ($1,$2,1) ON CONFLICT(device_model_id, stock_location_id) DO UPDATE SET quantity = product_stock.quantity + 1, updated_at = NOW()',
+        [modelId, stockLocationId]
+      );
+      await client.query(
+        "INSERT INTO product_stock_movements(device_model_id, stock_location_id, quantity_delta, movement_type, device_id, notes, moved_by) VALUES ($1,$2,1,'adjustment',$3,$4,$5)",
+        [modelId, stockLocationId, result.rows[0].id, 'Carico device censito manualmente #' + result.rows[0].id, req.user.id]
+      );
+    }
     const saved = await client.query('SELECT * FROM devices WHERE id = $1', [result.rows[0].id]);
     await client.query('COMMIT');
     res.status(201).json({ data: saved.rows[0] });
@@ -1627,9 +1641,9 @@ app.get('/finance/dashboard',async(req,res,next)=>{
  (SELECT COALESCE(SUM(d.monthly_fee),0)::numeric FROM devices d WHERE d.ownership_type='rental' AND d.status<>'decommissioned' AND ($1::bigint IS NULL OR d.branch_id=$1)) AS monthly_fees,
  (SELECT COUNT(*)::int FROM devices d WHERE d.ownership_type='rental' AND ($1::bigint IS NULL OR d.branch_id=$1)) AS rental_devices,
  (SELECT COUNT(*)::int FROM devices d WHERE d.ownership_type='sale' AND ($1::bigint IS NULL OR d.branch_id=$1)) AS owned_devices,
- (totals.nol_current_month+charge_totals.global_charges_current_month)::numeric AS nol_current_month,
- (totals.nol_all_time+charge_totals.global_charges_all_time)::numeric AS nol_all_time,
- (totals.nol_balance+charge_totals.global_charges_all_time)::numeric AS nol_balance,
+ totals.nol_current_month AS nol_current_month,
+  totals.nol_all_time AS nol_all_time,
+  totals.nol_balance AS nol_balance,
  sales.sales_current_month,sales.sales_all_time,
  costs.hardware_costs,costs.license_costs,costs.other_costs,
  (costs.hardware_costs+costs.license_costs+costs.other_costs)::numeric AS total_costs,
