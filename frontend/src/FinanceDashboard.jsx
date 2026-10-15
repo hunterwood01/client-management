@@ -20,6 +20,10 @@ export default function FinanceDashboard({ finance, branches = [], devices = [],
   const activeNolMonthly = Number(finance?.nol_current_month || 0);
   const revenueAllTime = Number(finance?.nol_all_time || 0);
   const costs = Number(finance?.total_costs || 0);
+  const hardwareCosts = Number(finance?.hardware_costs || 0);
+  const eaCosts = Number(finance?.license_costs || 0);
+  const otherChargesRevenue = Number(finance?.global_charges_all_time || 0);
+  const margin = revenueAllTime + otherChargesRevenue + Number(finance?.sales_all_time || 0) - hardwareCosts - eaCosts;
   const selectedBranch = branchFilter === 'all' ? null : branches.find(b => String(b.id) === String(branchFilter));
   const selectedLabel = selectedBranch ? [selectedBranch.company_name, selectedBranch.country, selectedBranch.street].filter(Boolean).join(' - ') : 'Tutte le filiali';
   const faultCount = devices.filter(d => d.status === 'fault').length;
@@ -36,6 +40,7 @@ export default function FinanceDashboard({ finance, branches = [], devices = [],
       <Metric label="NOL · totale storico" value={money(revenueAllTime)} caption="Solo canoni dei device effettivamente attivati" icon="€" tone="violet" />
       <Metric label="Investimento device NOL" value={money(allNolInvestment)} caption="Costo registrato dei device NOL visibili" icon="▣" tone="blue" />
       <Metric label="Costi complessivi" value={money(costs)} caption="Hardware, licenze e altri costi registrati" icon="↘" tone="amber" />
+      <Metric label="Margine complessivo" value={money(margin)} caption="Ricavi NOL, canoni e vendite DDE meno acquisti hardware e costi EA" icon="↗" tone={margin >= 0 ? "green" : "red"} />
       <Metric label="Device in stato guasto" value={String(faultCount)} caption="Apparati da gestire" icon="!" tone={faultCount ? 'red' : 'green'} />
     </div>
 
