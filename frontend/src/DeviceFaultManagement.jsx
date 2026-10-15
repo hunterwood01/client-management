@@ -14,6 +14,7 @@ export default function DeviceFaultManagement({ device, devices, locations, prod
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [editing, setEditing] = useState(null);
+  const [selectedReplacementModel, setSelectedReplacementModel] = useState('');
   const [form, setForm] = useState({ fault_date: new Date().toISOString().slice(0,10), description: '', outcome: 'pending', rma_number: '', rma_status: 'da_aprire', replacement_device_id: '', replacement_stock_model_id: '', replacement_stock_location_id: '', additional_cost: '0', cost_description: '', notes: '' });
 
   async function load() {
@@ -25,33 +26,37 @@ export default function DeviceFaultManagement({ device, devices, locations, prod
   useEffect(() => { load(); }, [device.id]);
   function startNew() {
     setEditing(null);
+    setSelectedReplacementModel('');
     setForm({ fault_date: new Date().toISOString().slice(0,10), description: '', outcome: 'pending', rma_number: '', rma_status: 'da_aprire', replacement_device_id: '', replacement_stock_model_id: '', replacement_stock_location_id: device.stock_location_id ? String(device.stock_location_id) : '', additional_cost: '0', cost_description: '', notes: '' });
   }
   function editEvent(event) {
     setEditing(event.id);
+    setSelectedReplacementModel(String(devices.find(item => String(item.id) === String(event.replacement_device_id))?.model_id || ''));
     setForm({ fault_date: String(event.fault_date || '').slice(0,10), description: event.description || '', outcome: event.outcome || 'pending', rma_number: event.rma_number || '', rma_status: event.rma_status || 'da_aprire', replacement_device_id: event.replacement_device_id ? String(event.replacement_device_id) : '', replacement_stock_model_id: event.replacement_stock_model_id ? String(event.replacement_stock_model_id) : '', replacement_stock_location_id: event.replacement_stock_location_id ? String(event.replacement_stock_location_id) : '', additional_cost: String(event.additional_cost || 0), cost_description: event.cost_description || '', notes: event.notes || '' });
   }
   async function save(event) {
     event.preventDefault(); setSaving(true); setError('');
     try {
-      const payload = { ...form, replacement_device_id: form.replacement_device_id ? Number(form.replacement_device_id) : null, replacement_stock_model_id: form.replacement_stock_model_id ? Number(form.replacement_stock_model_id) : null, replacement_stock_location_id: form.replacement_stock_location_id ? Number(form.replacement_stock_location_id) : null, additional_cost: Number(form.additional_cost || 0) };
+      const payload = { ...form, replacement_device_id: form.replacement_device_id ? Number(form.replacement_device_id) : null, replacement_stock_model_id: null, replacement_stock_location_id: form.replacement_stock_location_id ? Number(form.replacement_stock_location_id) : null, additional_cost: Number(form.additional_cost || 0) };
       await api(editing ? '/device-fault-events/' + editing : '/devices/' + device.id + '/fault-events', { method: editing ? 'PUT' : 'POST', body: JSON.stringify(payload) });
       await load(); await onSaved(); startNew();
     } catch (err) { setError(err.message); }
     finally { setSaving(false); }
   }
-  const available = devices.filter(item =>
+  const availableAtWarehouse = devices.filter(item =>
     String(item.id) !== String(device.id) &&
     item.status === 'in_stock' &&
     !item.branch_id &&
     item.stock_consumed !== true &&
-    (!form.replacement_stock_location_id || String(item.stock_location_id || '') === String(form.replacement_stock_location_id)) &&
-    String(item.model_id ?? item.device_model_id) === String(device.model_id ?? device.device_model_id)
+    Boolean(form.replacement_stock_location_id) &&
+    String(item.stock_location_id || '') === String(form.replacement_stock_location_id)
   );
-  const availableStock = productStock.filter(item =>
-    Number(item.available_quantity ?? item.quantity ?? 0) > 0 &&
-    (!form.replacement_stock_location_id || String(item.stock_location_id || '') === String(form.replacement_stock_location_id)) &&
-    String(item.device_model_id ?? item.model_id) === String(device.model_id ?? device.device_model_id)
+  const replacementModels = [...new Map(availableAtWarehouse.map(item => [
+    String(item.model_id ?? item.device_model_id),
+    { id: String(item.model_id ?? item.device_model_id), label: [item.manufacturer, item.model_name].filter(Boolean).join(' ') || item.sku || ('Modello #' + (item.model_id ?? item.device_model_id)) }
+  ])).values()].filter(item => item.id && item.id !== 'undefined');
+  const available = availableAtWarehouse.filter(item =>
+    selectedReplacementModel && String(item.model_id ?? item.device_model_id) === String(selectedReplacementModel)
   );
   const outcomeLabel = { pending: 'In valutazione', rma: 'RMA', sci: 'SCI · irrecuperabile', resolved: 'Risolto' };
   const rmaLabel = { da_aprire: 'Da aprire', aperta: 'Aperta', spedito: 'Spedito al fornitore', in_riparazione: 'In riparazione', sostituito: 'Sostituito', chiusa: 'Chiusa' };
@@ -65,8 +70,9 @@ export default function DeviceFaultManagement({ device, devices, locations, prod
             <div className="form-grid"><label>Data guasto<input type="date" value={form.fault_date} onChange={e => setForm({...form, fault_date:e.target.value})} required /></label><label>Esito<select value={form.outcome} onChange={e => setForm({...form, outcome:e.target.value})}><option value="pending">In valutazione</option><option value="rma">RMA</option><option value="sci">SCI · irrecuperabile</option><option value="resolved">Risolto</option></select></label></div>
             <label>Descrizione del problema<textarea rows="2" value={form.description} onChange={e => setForm({...form, description:e.target.value})} required /></label>
             {form.outcome === 'rma' && <div className="form-grid"><label>Numero RMA<input value={form.rma_number} onChange={e => setForm({...form, rma_number:e.target.value})} placeholder="Numero pratica" /></label><label>Stato RMA<select value={form.rma_status} onChange={e => setForm({...form, rma_status:e.target.value})}>{Object.entries(rmaLabel).map(([value,label]) => <option key={value} value={value}>{label}</option>)}</select></label></div>}
-            <label>Magazzino del sostitutivo<select value={form.replacement_stock_location_id} onChange={e => setForm({...form, replacement_stock_location_id:e.target.value, replacement_device_id:'', replacement_stock_model_id:''})}><option value="">Qualsiasi magazzino</option>{locations.map(location => <option key={location.id} value={String(location.id)}>{location.name}</option>)}</select></label>
-            <label>Device sostitutivo già censito<select value={form.replacement_device_id} onChange={e => setForm({...form, replacement_device_id:e.target.value, replacement_stock_model_id:''})}><option value="">Nessun device già censito{available.length ? '' : ' disponibile per questo modello e magazzino'}</option>{available.map(item => <option key={item.id} value={String(item.id)}>{item.sku || item.model_name} · {item.serial_number || ('Device #' + item.id)} · {item.stock_location || 'Magazzino non indicato'}</option>)}</select></label>{device.ownership_type === 'rental' && <label>Prelievo da giacenza di magazzino<select value={form.replacement_stock_model_id} onChange={e => setForm({...form, replacement_stock_model_id:e.target.value.split(':')[0] || '', replacement_device_id:'', replacement_stock_location_id:e.target.value.split(':')[1] || ''})}><option value="">Nessun prelievo da giacenza{availableStock.length ? '' : ' disponibile per questo modello e magazzino'}</option>{availableStock.map(item => <option key={item.device_model_id + '-' + item.stock_location_id} value={String(item.device_model_id) + ':' + String(item.stock_location_id)}>{item.sku || item.model_name} · {item.stock_location_name} · disponibili: {Number(item.available_quantity ?? item.quantity ?? 0)} · costo unitario medio: {money(item.average_unit_cost)}</option>)}</select><small className="field-hint">Mostra la giacenza reale per modello e magazzino. Il costo del materiale verrà registrato sul guasto NOL al prelievo.</small></label>}
+            <label>1. Magazzino del sostitutivo<select value={form.replacement_stock_location_id} onChange={e => { setSelectedReplacementModel(''); setForm({...form, replacement_stock_location_id:e.target.value, replacement_device_id:'', replacement_stock_model_id:''}); }} required><option value="">Seleziona un magazzino</option>{locations.map(location => <option key={location.id} value={String(location.id)}>{location.name}</option>)}</select></label>
+            <label>2. Modello del sostitutivo<select value={selectedReplacementModel} onChange={e => { setSelectedReplacementModel(e.target.value); setForm({...form, replacement_device_id:'', replacement_stock_model_id:''}); }} disabled={!form.replacement_stock_location_id}><option value="">Seleziona prima il magazzino</option>{replacementModels.map(model => <option key={model.id} value={model.id}>{model.label}</option>)}</select><small className="field-hint">{!form.replacement_stock_location_id ? 'Scegli il magazzino per vedere i modelli disponibili.' : replacementModels.length ? 'Sono mostrati solo i modelli con device fisici disponibili in questo magazzino.' : 'Nessun device disponibile nel magazzino selezionato.'}</small></label>
+            <label>3. Device sostitutivo<select value={form.replacement_device_id} onChange={e => setForm({...form, replacement_device_id:e.target.value, replacement_stock_model_id:''})} disabled={!selectedReplacementModel}><option value="">{!selectedReplacementModel ? 'Seleziona prima il modello' : available.length ? 'Seleziona un device disponibile' : 'Nessun device disponibile per questo modello'}</option>{available.map(item => <option key={item.id} value={String(item.id)}>{item.sku || item.model_name || 'Device'} · {item.serial_number ? 'Seriale ' + item.serial_number : 'Device #' + item.id} · costo: {money(item.purchase_cost)}</option>)}</select><small className="field-hint">Per i device NOL, il costo hardware del sostitutivo viene preso dal device selezionato e registrato nello storico guasti.</small></label>
             <div className="form-grid"><label>Costi aggiuntivi (€)<input type="number" min="0" step="0.01" value={form.additional_cost} onChange={e => setForm({...form, additional_cost:e.target.value})} required /></label><label>Descrizione costo<input value={form.cost_description} onChange={e => setForm({...form, cost_description:e.target.value})} placeholder="Trasporto, riparazione…" /></label></div>
             <label>Note<textarea rows="2" value={form.notes} onChange={e => setForm({...form, notes:e.target.value})} /></label>
             {form.outcome === 'sci' && <p className="field-hint">Con l'esito SCI il dispositivo originale sarà marcato come dismesso. Il costo storico non viene cancellato.</p>}
