@@ -757,6 +757,108 @@ app.delete('/purchase-profiles/:id', requireRole('admin'), async (req, res, next
   }
 });
 
+app.get('/devices/:id/fault-events', async (req, res, next) => {
+  const id = parseId(req.params.id);
+  if (!id) return fail(res, 400, 'ID dispositivo non valido.');
+  try {
+    const result = await pool.query(
+      `SELECT f.*, b.nomenclature AS branch_nomenclature, c.legal_name AS company_name,
+        rd.serial_number AS replacement_serial, rm.model_name AS replacement_model
+       FROM device_fault_events f
+       LEFT JOIN branches b ON b.id = f.branch_id
+       LEFT JOIN companies c ON c.id = b.company_id
+       LEFT JOIN devices rd ON rd.id = f.replacement_device_id
+       LEFT JOIN device_models rm ON rm.id = rd.model_id
+       WHERE f.device_id = $1 ORDER BY f.fault_date DESC, f.id DESC`, [id]);
+    res.json({ data: result.rows });
+  } catch (error) { next(error); }
+});
+
+app.post('/devices/:id/fault-events', requireRole('admin', 'technician', 'warehouse'), async (req, res, next) => {
+  const deviceId = parseId(req.params.id);
+  const faultDate = req.body?.fault_date || new Date().toISOString().slice(0, 10);
+  const description = cleanString(req.body?.description, 10000);
+  const outcome = req.body?.outcome || 'pending';
+  const rmaNumber = cleanString(req.body?.rma_number, 120);
+  const rmaStatus = cleanString(req.body?.rma_status, 40);
+  const replacementId = req.body?.replacement_device_id ? parseId(req.body.replacement_device_id) : null;
+  const replacementLocationId = req.body?.replacement_stock_location_id ? parseId(req.body.replacement_stock_location_id) : null;
+  const additionalCost = Number(req.body?.additional_cost || 0);
+  const costDescription = cleanString(req.body?.cost_description, 300);
+  const notes = cleanString(req.body?.notes, 10000);
+  if (!deviceId || !/^\d{4}-\d{2}-\d{2}$/.test(faultDate) || !description || [rmaNumber, rmaStatus, costDescription, notes].includes(undefined)) return fail(res, 400, 'Data, descrizione o campi non validi.');
+  if (!['pending','rma','sci','resolved'].includes(outcome) || !Number.isFinite(additionalCost) || additionalCost < 0) return fail(res, 400, 'Esito o costo aggiuntivo non valido.');
+  if (req.body?.replacement_device_id && !replacementId) return fail(res, 400, 'Device sostitutivo non valido.');
+  if (req.body?.replacement_stock_location_id && !replacementLocationId) return fail(res, 400, 'Magazzino sostitutivo non valido.');
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const original = await client.query('SELECT * FROM devices WHERE id=$1 FOR UPDATE', [deviceId]);
+    if (!original.rowCount) { await client.query('ROLLBACK'); return fail(res, 404, 'Dispositivo non trovato.'); }
+    if (replacementId) {
+      const replacement = await client.query('SELECT * FROM devices WHERE id=$1 FOR UPDATE', [replacementId]);
+      if (!replacement.rowCount || replacement.rows[0].status !== 'in_stock' || String(replacement.rows[0].model_id) !== String(original.rows[0].model_id)) {
+        await client.query('ROLLBACK'); return fail(res, 409, 'Il sostitutivo deve essere a magazzino e dello stesso modello.');
+      }
+      if (replacementLocationId && String(replacement.rows[0].stock_location_id) !== String(replacementLocationId)) {
+        await client.query('ROLLBACK'); return fail(res, 409, 'Il sostitutivo non appartiene al magazzino selezionato.');
+      }
+      await client.query("UPDATE devices SET branch_id=$1, status='to_activate', updated_at=NOW() WHERE id=$2", [original.rows[0].branch_id, replacementId]);
+    }
+    const inserted = await client.query(
+      `INSERT INTO device_fault_events(device_id,branch_id,fault_date,description,outcome,rma_number,rma_status,replacement_device_id,replacement_stock_location_id,additional_cost,cost_description,notes,created_by,status,closed_at)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,CASE WHEN $14='closed' THEN NOW() ELSE NULL END) RETURNING *`,
+      [deviceId, original.rows[0].branch_id, faultDate, description, outcome, rmaNumber, rmaStatus, replacementId, replacementLocationId, additionalCost, costDescription, notes, req.user.id, (outcome === 'resolved' || outcome === 'sci') ? 'closed' : 'open']);
+    await client.query("UPDATE devices SET status=$1, updated_at=NOW() WHERE id=$2", [outcome === 'sci' ? 'decommissioned' : (outcome === 'resolved' ? 'operational' : 'fault'), deviceId]);
+    await client.query('COMMIT');
+    res.status(201).json({ data: inserted.rows[0] });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    if (error.code === '23503') return fail(res, 400, 'Filiale, device o magazzino non valido.');
+    next(error);
+  } finally { client.release(); }
+});
+
+app.put('/device-fault-events/:id', requireRole('admin', 'technician', 'warehouse'), async (req, res, next) => {
+  const id = parseId(req.params.id);
+  const faultDate = req.body?.fault_date;
+  const description = cleanString(req.body?.description, 10000);
+  const outcome = req.body?.outcome;
+  const rmaNumber = cleanString(req.body?.rma_number, 120);
+  const rmaStatus = cleanString(req.body?.rma_status, 40);
+  const replacementId = req.body?.replacement_device_id ? parseId(req.body.replacement_device_id) : null;
+  const replacementLocationId = req.body?.replacement_stock_location_id ? parseId(req.body.replacement_stock_location_id) : null;
+  const additionalCost = Number(req.body?.additional_cost || 0);
+  const costDescription = cleanString(req.body?.cost_description, 300);
+  const notes = cleanString(req.body?.notes, 10000);
+  if (!id || !/^\d{4}-\d{2}-\d{2}$/.test(String(faultDate || '')) || !description || [rmaNumber,rmaStatus,costDescription,notes].includes(undefined)) return fail(res, 400, 'Data, descrizione o campi non validi.');
+  if (!['pending','rma','sci','resolved'].includes(outcome) || !Number.isFinite(additionalCost) || additionalCost < 0) return fail(res, 400, 'Esito o costo aggiuntivo non valido.');
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const found = await client.query('SELECT * FROM device_fault_events WHERE id=$1 FOR UPDATE', [id]);
+    if (!found.rowCount) { await client.query('ROLLBACK'); return fail(res, 404, 'Evento guasto non trovato.'); }
+    const event = found.rows[0];
+    if (replacementId) {
+      const replacement = await client.query('SELECT * FROM devices WHERE id=$1 FOR UPDATE', [replacementId]);
+      if (!replacement.rowCount || String(replacement.rows[0].model_id) !== String((await client.query('SELECT model_id FROM devices WHERE id=$1',[event.device_id])).rows[0].model_id)) {
+        await client.query('ROLLBACK'); return fail(res, 409, 'Il sostitutivo deve essere dello stesso modello.');
+      }
+      if (String(event.replacement_device_id || '') !== String(replacementId) && replacement.rows[0].status !== 'in_stock') {
+        await client.query('ROLLBACK'); return fail(res, 409, 'Il nuovo sostitutivo deve essere a magazzino.');
+      }
+      await client.query("UPDATE devices SET branch_id=$1, status='to_activate', updated_at=NOW() WHERE id=$2", [event.branch_id, replacementId]);
+    }
+    const result = await client.query(
+      `UPDATE device_fault_events SET fault_date=$1,description=$2,outcome=$3,rma_number=$4,rma_status=$5,replacement_device_id=$6,replacement_stock_location_id=$7,additional_cost=$8,cost_description=$9,notes=$10,status=$11,closed_at=CASE WHEN $11='closed' THEN COALESCE(closed_at,NOW()) ELSE NULL END,updated_at=NOW() WHERE id=$12 RETURNING *`,
+      [faultDate,description,outcome,rmaNumber,rmaStatus,replacementId,replacementLocationId,additionalCost,costDescription,notes,outcome === 'resolved' || outcome === 'sci' ? 'closed' : 'open',id]);
+    await client.query("UPDATE devices SET status=$1, updated_at=NOW() WHERE id=$2", [outcome === 'sci' ? 'decommissioned' : (outcome === 'resolved' ? 'operational' : 'fault'), event.device_id]);
+    await client.query('COMMIT');
+    res.json({ data: result.rows[0] });
+  } catch (error) { await client.query('ROLLBACK'); if (error.code === '23503') return fail(res, 400, 'Riferimento device o magazzino non valido.'); next(error); }
+  finally { client.release(); }
+});
+
 app.get('/devices', async (req, res, next) => {
   const filter = queryBranch(req);
   if (filter.error) return fail(res, 400, filter.error);
