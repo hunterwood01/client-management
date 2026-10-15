@@ -958,6 +958,20 @@ app.post('/devices', requireRole('admin', 'technician', 'warehouse'), async (req
       [modelId, branchId, stockLocationId, purchaseProfileId, assetTag, serial, status, ownership, cost, fee, purchased, activated, installed, notes]
     );
     await consumeDeviceStock(client, result.rows[0], branchId, status, req.user.id);
+    // A manually censused physical device is not part of an order's aggregate
+    // quantity. Add it to the stock ledger so warehouse quantities and fault
+    // replacement availability stay in sync. Order-linked devices are already
+    // represented by the quantity loaded when the purchase order was recorded.
+    if (!purchaseProfileId && !branchId && status === 'in_stock' && stockLocationId) {
+      await client.query(
+        'INSERT INTO product_stock(device_model_id, stock_location_id, quantity) VALUES ($1,$2,1) ON CONFLICT(device_model_id, stock_location_id) DO UPDATE SET quantity = product_stock.quantity + 1, updated_at = NOW()',
+        [modelId, stockLocationId]
+      );
+      await client.query(
+        "INSERT INTO product_stock_movements(device_model_id, stock_location_id, quantity_delta, movement_type, device_id, notes, moved_by) VALUES ($1,$2,1,'adjustment',$3,$4,$5)",
+        [modelId, stockLocationId, result.rows[0].id, 'Carico device censito manualmente #' + result.rows[0].id, req.user.id]
+      );
+    }
     const saved = await client.query('SELECT * FROM devices WHERE id = $1', [result.rows[0].id]);
     await client.query('COMMIT');
     res.status(201).json({ data: saved.rows[0] });
