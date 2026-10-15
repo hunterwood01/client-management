@@ -818,12 +818,12 @@ app.delete('/purchase-profiles/:id', requireRole('admin'), async (req, res, next
         );
       }
       await client.query(
-        "UPDATE product_stock_movements SET purchase_profile_id = NULL, notes = CONCAT(COALESCE(notes, ''), $1) WHERE purchase_profile_id = $2",
+        "UPDATE product_stock_movements SET purchase_profile_id = NULL, notes = CONCAT(COALESCE(notes, ''), $1::text) WHERE purchase_profile_id = $2",
         [' [ordine eliminato #' + id + (order.reference ? ' · ' + order.reference : '') + ']', id]
       );
     } else {
       await client.query(
-        "UPDATE product_stock_movements SET purchase_profile_id = NULL, notes = CONCAT(COALESCE(notes, ''), $1) WHERE purchase_profile_id = $2",
+        "UPDATE product_stock_movements SET purchase_profile_id = NULL, notes = CONCAT(COALESCE(notes, ''), $1::text) WHERE purchase_profile_id = $2",
         [' [ordine eliminato #' + id + (order.reference ? ' · ' + order.reference : '') + ']', id]
       );
     }
