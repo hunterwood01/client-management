@@ -54,7 +54,7 @@ function calculateDeviceAmortization(device, now = new Date()) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate) || !Number.isFinite(cost) || cost <= 0 || !Number.isFinite(monthlyFee) || monthlyFee <= 0) {
     return { available: false, complete: false, percent: 0 };
   }
-  const [startYear, startMonth, startDay] = startDate.split('-').map(Number);
+  const [startYear, startMonth] = startDate.split('-').map(Number);
   const todayYear = now.getFullYear();
   const todayMonth = now.getMonth() + 1;
   const todayDate = [todayYear, String(todayMonth).padStart(2, '0'), String(now.getDate()).padStart(2, '0')].join('-');
