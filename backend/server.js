@@ -1183,7 +1183,19 @@ app.delete('/devices/:id', requireRole('admin'), async (req, res, next) => {
 
 app.get('/stock/locations', async (_req, res, next) => {
   try {
-    const result = await pool.query('SELECT sl.*, COUNT(d.id)::int AS device_count FROM stock_locations sl LEFT JOIN devices d ON d.stock_location_id = sl.id GROUP BY sl.id ORDER BY sl.name');
+    const result = await pool.query(`
+      SELECT sl.*,
+        (
+          COALESCE((SELECT SUM(ps.quantity) FROM product_stock ps WHERE ps.stock_location_id = sl.id), 0)
+          + COALESCE((SELECT COUNT(*) FROM devices d
+            WHERE d.stock_location_id = sl.id
+              AND d.branch_id IS NULL
+              AND d.status IN ('in_stock', 'to_activate')
+              AND COALESCE(d.stock_consumed, FALSE) = FALSE), 0)
+        )::int AS device_count
+      FROM stock_locations sl
+      ORDER BY sl.name
+    `);
     res.json({ data: result.rows });
   } catch (error) { next(error); }
 });
@@ -1319,6 +1331,7 @@ app.get('/product-stock',async(_req,res,next)=>{
     WHERE d.model_id=ps.device_model_id AND d.stock_location_id=ps.stock_location_id
      AND COALESCE(d.stock_consumed,FALSE)=TRUE
    ) consumed ON TRUE
+   WHERE ps.quantity > 0 OR COALESCE(consumed.quantity,0) > 0
    ORDER BY m.manufacturer,m.model_name,sl.name
   `);
   res.json({data:result.rows});
