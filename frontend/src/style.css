@@ -142,6 +142,13 @@ h1, h2, h3 { letter-spacing: -.035em; }
 .quick-action small { color: var(--muted); font-size: 10px; margin-top: 4px; }
 .quick-arrow { color: var(--muted); font-size: 15px; }
 .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.device-toolbar { display: grid; grid-template-columns: minmax(280px, 1fr) auto; align-items: end; gap: 18px; padding: 18px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); box-shadow: var(--shadow); }
+.device-toolbar .search-box { width: 100%; max-width: none; min-height: 44px; }
+.device-filter-actions { display: flex; align-items: end; justify-content: flex-end; flex-wrap: wrap; gap: 12px; }
+.device-filter-actions .device-status-filter { display: flex; flex-direction: column; align-items: stretch; gap: 6px; font-weight: 650; }
+.device-filter-actions .device-status-filter select { min-width: 176px; min-height: 44px; }
+.device-filter-actions .secondary-button { min-height: 44px; }
+.device-filter-actions .result-count { align-self: center; padding: 0 4px; font-size: 12px; }
 .search-box { display: flex; flex-direction: row; align-items: center; gap: 8px; width: min(440px, 100%); border: 1px solid var(--border); border-radius: 9px; padding: 0 11px; background: var(--surface); color: var(--muted); }
 .search-box input { border: 0; box-shadow: none; padding: 10px 0; font-size: 11px; background: transparent; }
 .search-box input:focus { box-shadow: none; }
@@ -291,6 +298,11 @@ tbody tr:hover td { background: color-mix(in srgb, var(--surface-soft) 72%, tran
   .stat-value { font-size: 22px; }
   .stat-caption { font-size: 9px; }
   .toolbar { align-items: flex-start; flex-direction: column; }
+  .device-toolbar { grid-template-columns: 1fr; padding: 13px; }
+  .device-filter-actions { justify-content: flex-start; width: 100%; }
+  .device-filter-actions .device-status-filter { flex: 1; min-width: 150px; }
+  .device-filter-actions .device-status-filter select { width: 100%; min-width: 0; }
+  .device-filter-actions .result-count { margin-left: auto; }
   .search-box { width: 100%; }
   .detail-heading { flex-wrap: wrap; }
   .detail-heading > .secondary-button { margin-left: auto; }
