@@ -628,73 +628,151 @@ app.put('/purchase-profiles/:id', requireRole('admin'), async (req, res, next) =
   const quantity = Number(req.body?.quantity);
   const notes = cleanString(req.body?.notes, 10000);
   const stockLocationId = req.body?.stock_location_id === null || req.body?.stock_location_id === '' ? null : parseId(req.body?.stock_location_id);
-  if (!id || [supplier, reference, notes].includes(undefined) || (req.body?.stock_location_id && !stockLocationId) || !Number.isInteger(quantity) || quantity < 1 || quantity > 100000) return fail(res, 400, 'Ordine, quantità o campi non validi.');
+  if (!id || [supplier, reference, notes].includes(undefined) || (req.body?.stock_location_id && !stockLocationId) || !Number.isInteger(quantity) || quantity < 0 || quantity > 100000) return fail(res, 400, 'Ordine, quantità o campi non validi.');
   if (unitCost !== null && (!Number.isFinite(unitCost) || unitCost < 0)) return fail(res, 400, 'Il costo unitario deve essere un importo valido e non negativo.');
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
     const found = await client.query('SELECT * FROM purchase_profiles WHERE id = $1 FOR UPDATE', [id]);
     if (!found.rowCount) { await client.query('ROLLBACK'); return fail(res, 404, 'Ordine non trovato.'); }
     const order = found.rows[0];
-    const consumed = await client.query('SELECT COUNT(*)::int AS count FROM devices WHERE purchase_profile_id = $1 AND stock_consumed = TRUE', [id]);
-    const consumedCount = consumed.rows[0].count;
-    if (quantity < consumedCount) {
+    const oldQuantity = Number(order.quantity || 0);
+    const reduction = oldQuantity - quantity;
+
+    const linked = await client.query(
+      `SELECT
+         COUNT(*) FILTER (WHERE branch_id IS NOT NULL OR status NOT IN ('in_stock','to_activate') OR stock_consumed = TRUE)::int AS used_count,
+         COUNT(*) FILTER (WHERE branch_id IS NULL AND status IN ('in_stock','to_activate') AND stock_consumed IS NOT TRUE
+           AND (stock_location_id = $2 OR stock_location_id IS NULL))::int AS available_count
+       FROM devices WHERE purchase_profile_id = $1`,
+      [id, order.stock_location_id]
+    );
+    const usedCount = Number(linked.rows[0].used_count || 0);
+    const availableCount = Number(linked.rows[0].available_count || 0);
+
+    if (quantity < usedCount) {
       await client.query('ROLLBACK');
-      return fail(res, 409, 'La quantità non può essere inferiore ai device già prelevati da questo ordine (' + consumedCount + ').');
+      return fail(res, 409, 'La quantità non può essere inferiore ai device già assegnati o utilizzati (' + usedCount + ').');
     }
+    if (availableCount > oldQuantity) {
+      await client.query('ROLLBACK');
+      return fail(res, 409, 'Ordine non modificato: i device fisici associati superano la quantità registrata. Verificare prima la coerenza del magazzino.');
+    }
+    if (quantity === 0 && usedCount > 0) {
+      await client.query('ROLLBACK');
+      return fail(res, 409, 'Impossibile azzerare l’ordine: ci sono device associati già assegnati o utilizzati.');
+    }
+
     const newLocationId = stockLocationId;
-    const delta = quantity - Number(order.quantity || 1);
     const locationChanged = String(order.stock_location_id || '') !== String(newLocationId || '');
-    if (locationChanged) {
-      const remainingForOrder = Math.max(0, quantity - consumedCount);
-      let transferable = 0;
-      if (order.stock_location_id) {
-        const oldStock = await client.query(
-          'SELECT quantity FROM product_stock WHERE device_model_id = $1 AND stock_location_id = $2 FOR UPDATE',
-          [order.device_model_id, order.stock_location_id]
-        );
-        transferable = Math.min(remainingForOrder, Number(oldStock.rows[0]?.quantity || 0));
-        if (transferable > 0) {
-          await client.query(
-            'UPDATE product_stock SET quantity = quantity - $1, updated_at = NOW() WHERE device_model_id = $2 AND stock_location_id = $3',
-            [transferable, order.device_model_id, order.stock_location_id]
-          );
-          await client.query(
-            "INSERT INTO product_stock_movements(device_model_id, stock_location_id, quantity_delta, movement_type, purchase_profile_id, notes, moved_by) VALUES ($1,$2,$3,'adjustment',$4,$5,$6)",
-            [order.device_model_id, order.stock_location_id, -transferable, id, 'Spostamento carico ordine ' + (reference || order.reference || id), req.user.id]
-          );
-        }
-      }
-      const quantityToMove = order.stock_location_id ? transferable : remainingForOrder;
-      if (newLocationId && quantityToMove > 0) {
+    if (locationChanged && quantity !== oldQuantity) {
+      await client.query('ROLLBACK');
+      return fail(res, 409, 'Per sicurezza, modifica prima la quantità dell’ordine; lo spostamento di magazzino va eseguito separatamente.');
+    }
+    if (locationChanged && quantity === oldQuantity) {
+      const transferable = Math.min(oldQuantity - usedCount, Number((await client.query(
+        'SELECT quantity FROM product_stock WHERE device_model_id = $1 AND stock_location_id = $2 FOR UPDATE',
+        [order.device_model_id, order.stock_location_id]
+      )).rows[0]?.quantity || 0));
+      if (order.stock_location_id && transferable > 0) {
         await client.query(
-          'INSERT INTO product_stock(device_model_id, stock_location_id, quantity) VALUES ($1,$2,$3) ON CONFLICT(device_model_id, stock_location_id) DO UPDATE SET quantity = product_stock.quantity + EXCLUDED.quantity, updated_at = NOW()',
-          [order.device_model_id, newLocationId, quantityToMove]
+          'UPDATE product_stock SET quantity = quantity - $1, updated_at = NOW() WHERE device_model_id = $2 AND stock_location_id = $3',
+          [transferable, order.device_model_id, order.stock_location_id]
         );
         await client.query(
           "INSERT INTO product_stock_movements(device_model_id, stock_location_id, quantity_delta, movement_type, purchase_profile_id, notes, moved_by) VALUES ($1,$2,$3,'adjustment',$4,$5,$6)",
-          [order.device_model_id, newLocationId, quantityToMove, id, 'Riassegnazione ordine ' + (reference || order.reference || id), req.user.id]
+          [order.device_model_id, order.stock_location_id, -transferable, id, 'Spostamento carico ordine ' + (reference || order.reference || id), req.user.id]
         );
       }
-    } else if (delta !== 0 && order.stock_location_id) {
-      if (delta > 0) {
-        await client.query('INSERT INTO product_stock(device_model_id, stock_location_id, quantity) VALUES ($1,$2,$3) ON CONFLICT(device_model_id, stock_location_id) DO UPDATE SET quantity = product_stock.quantity + EXCLUDED.quantity, updated_at = NOW()', [order.device_model_id, order.stock_location_id, delta]);
-      } else {
-        const stock = await client.query('UPDATE product_stock SET quantity = quantity + $1, updated_at = NOW() WHERE device_model_id = $2 AND stock_location_id = $3 AND quantity + $1 >= 0 RETURNING quantity', [delta, order.device_model_id, order.stock_location_id]);
-        if (!stock.rowCount) {
-          await client.query('ROLLBACK');
-          return fail(res, 409, 'Impossibile ridurre la quantità: la giacenza disponibile non è sufficiente.');
-        }
+      if (newLocationId && transferable > 0) {
+        await client.query(
+          'INSERT INTO product_stock(device_model_id, stock_location_id, quantity) VALUES ($1,$2,$3) ON CONFLICT(device_model_id, stock_location_id) DO UPDATE SET quantity = product_stock.quantity + EXCLUDED.quantity, updated_at = NOW()',
+          [order.device_model_id, newLocationId, transferable]
+        );
+        await client.query(
+          "INSERT INTO product_stock_movements(device_model_id, stock_location_id, quantity_delta, movement_type, purchase_profile_id, notes, moved_by) VALUES ($1,$2,$3,'adjustment',$4,$5,$6)",
+          [order.device_model_id, newLocationId, transferable, id, 'Riassegnazione ordine ' + (reference || order.reference || id), req.user.id]
+        );
       }
-      await client.query("INSERT INTO product_stock_movements(device_model_id, stock_location_id, quantity_delta, movement_type, purchase_profile_id, notes, moved_by) VALUES ($1,$2,$3,'adjustment',$4,$5,$6)", [order.device_model_id, order.stock_location_id, delta, id, 'Modifica quantità ordine ' + (reference || order.reference || id), req.user.id]);
     }
-    const result = await client.query('UPDATE purchase_profiles SET supplier = $1, reference = $2, purchased_on = $3, unit_cost = $4, quantity = $5, stock_location_id = $6, notes = $7 WHERE id = $8 RETURNING *', [supplier, reference, purchasedOn, unitCost, quantity, newLocationId, notes, id]);
+
+    if (reduction > 0 && order.stock_location_id) {
+      const stock = await client.query(
+        'SELECT quantity FROM product_stock WHERE device_model_id = $1 AND stock_location_id = $2 FOR UPDATE',
+        [order.device_model_id, order.stock_location_id]
+      );
+      const stockQuantity = Number(stock.rows[0]?.quantity || 0);
+      if (stockQuantity < reduction) {
+        await client.query('ROLLBACK');
+        return fail(res, 409, 'Impossibile ridurre la quantità: la giacenza disponibile nel magazzino non è sufficiente. Nessuna modifica eseguita.');
+      }
+
+      const devicesToRemove = quantity === 0 ? availableCount : Math.min(reduction, availableCount);
+      if (devicesToRemove > 0) {
+        await client.query(
+          `DELETE FROM devices WHERE id IN (
+             SELECT id FROM devices
+             WHERE purchase_profile_id = $1 AND branch_id IS NULL
+               AND status IN ('in_stock','to_activate') AND stock_consumed IS NOT TRUE
+               AND (stock_location_id = $2 OR stock_location_id IS NULL)
+             ORDER BY id DESC LIMIT $3 FOR UPDATE
+           )`,
+          [id, order.stock_location_id, devicesToRemove]
+        );
+      }
+      await client.query(
+        'UPDATE product_stock SET quantity = quantity - $1, updated_at = NOW() WHERE device_model_id = $2 AND stock_location_id = $3',
+        [reduction, order.device_model_id, order.stock_location_id]
+      );
+      await client.query(
+        "INSERT INTO product_stock_movements(device_model_id, stock_location_id, quantity_delta, movement_type, purchase_profile_id, notes, moved_by) VALUES ($1,$2,$3,'adjustment',$4,$5,$6)",
+        [order.device_model_id, order.stock_location_id, -reduction, 'Riduzione quantità ordine ' + (reference || order.reference || id), req.user.id]
+      );
+    } else if (reduction > 0 && !order.stock_location_id) {
+      if (quantity === 0 && availableCount > 0) {
+        await client.query(
+          `DELETE FROM devices WHERE id IN (
+             SELECT id FROM devices WHERE purchase_profile_id = $1 AND branch_id IS NULL
+               AND status IN ('in_stock','to_activate') AND stock_consumed IS NOT TRUE
+             ORDER BY id DESC LIMIT $2 FOR UPDATE
+           )`,
+          [id, availableCount]
+        );
+      }
+    } else if (quantity > oldQuantity && order.stock_location_id) {
+      const increase = quantity - oldQuantity;
+      await client.query(
+        'INSERT INTO product_stock(device_model_id, stock_location_id, quantity) VALUES ($1,$2,$3) ON CONFLICT(device_model_id, stock_location_id) DO UPDATE SET quantity = product_stock.quantity + EXCLUDED.quantity, updated_at = NOW()',
+        [order.device_model_id, order.stock_location_id, increase]
+      );
+      await client.query(
+        "INSERT INTO product_stock_movements(device_model_id, stock_location_id, quantity_delta, movement_type, purchase_profile_id, notes, moved_by) VALUES ($1,$2,$3,'adjustment',$4,$5,$6)",
+        [order.device_model_id, order.stock_location_id, increase, id, 'Aumento quantità ordine ' + (reference || order.reference || id), req.user.id]
+      );
+    }
+
+    if (quantity === 0) {
+      await client.query(
+        "UPDATE product_stock_movements SET purchase_profile_id = NULL, notes = CONCAT(COALESCE(notes, ''), $1) WHERE purchase_profile_id = $2",
+        [' [ordine azzerato ed eliminato #' + id + (reference || order.reference ? ' · ' + (reference || order.reference) : '') + ']', id]
+      );
+      await client.query('DELETE FROM purchase_profiles WHERE id = $1', [id]);
+      await client.query('COMMIT');
+      return res.status(204).end();
+    }
+
+    const result = await client.query(
+      'UPDATE purchase_profiles SET supplier = $1, reference = $2, purchased_on = $3, unit_cost = $4, quantity = $5, stock_location_id = $6, notes = $7 WHERE id = $8 RETURNING *',
+      [supplier, reference, purchasedOn, unitCost, quantity, newLocationId, notes, id]
+    );
     await client.query('COMMIT');
     res.json({ data: result.rows[0] });
   } catch (error) {
     await client.query('ROLLBACK');
-    if (error.code === '23503') return fail(res, 400, 'Ordine collegato a dati non validi.');
-    next(error);
+    if (error.code === '23503') return fail(res, 409, 'Operazione non consentita: il device o l’ordine è ancora collegato ad altri dati.');
+    console.error('Failed to update hardware purchase order', { orderId: id, code: error.code, message: error.message });
+    return fail(res, 500, 'Errore durante la modifica dell’ordine hardware. L’operazione è stata annullata.');
   } finally { client.release(); }
 });
 
