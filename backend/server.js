@@ -797,12 +797,12 @@ app.post('/devices/:id/fault-events', requireRole('admin', 'technician', 'wareho
   try {
     await client.query('BEGIN');
     const original = await client.query('SELECT d.*, m.default_purchase_cost, m.default_monthly_fee FROM devices d JOIN device_models m ON m.id=d.model_id WHERE d.id=$1 FOR UPDATE OF d', [deviceId]);
+    if (!original.rowCount) { await client.query('ROLLBACK'); return fail(res, 404, 'Dispositivo non trovato.'); }
     let replacementHardwareCost = 0;
     if (replacementStockModelId) {
-      if (original.rows[0]?.ownership_type !== 'rental') { await client.query('ROLLBACK'); return fail(res, 400, 'Il prelievo da giacenza per il costo hardware è previsto per device NOL.'); }
-      if (String(replacementStockModelId) !== String(original.rows[0]?.model_id)) { await client.query('ROLLBACK'); return fail(res, 409, 'Il materiale sostitutivo deve essere dello stesso modello del device guasto.'); }
+      if (original.rows[0].ownership_type !== 'rental') { await client.query('ROLLBACK'); return fail(res, 400, 'Il prelievo da giacenza per il costo hardware è previsto per device NOL.'); }
+      if (String(replacementStockModelId) !== String(original.rows[0].model_id)) { await client.query('ROLLBACK'); return fail(res, 409, 'Il materiale sostitutivo deve essere dello stesso modello del device guasto.'); }
     }
-    if (!original.rowCount) { await client.query('ROLLBACK'); return fail(res, 404, 'Dispositivo non trovato.'); }
     if (replacementStockModelId) {
       const stock = await client.query('SELECT ps.quantity, COALESCE((SELECT SUM(COALESCE(pp.unit_cost,0)*pp.quantity)/NULLIF(SUM(pp.quantity),0) FROM purchase_profiles pp WHERE pp.device_model_id=ps.device_model_id AND pp.stock_location_id=ps.stock_location_id), dm.default_purchase_cost, 0)::numeric AS unit_cost FROM product_stock ps JOIN device_models dm ON dm.id=ps.device_model_id WHERE ps.device_model_id=$1 AND ps.stock_location_id=$2 FOR UPDATE OF ps', [replacementStockModelId, replacementLocationId]);
       if (!stock.rowCount || Number(stock.rows[0].quantity) < 1) { await client.query('ROLLBACK'); return fail(res, 409, 'Nessuna giacenza disponibile nel magazzino selezionato.'); }
