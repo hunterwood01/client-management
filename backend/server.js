@@ -822,7 +822,7 @@ app.post('/devices/:id/fault-events', requireRole('admin', 'technician', 'wareho
         'SELECT d.*, dm.default_purchase_cost, pp.unit_cost AS profile_unit_cost FROM devices d JOIN device_models dm ON dm.id=d.model_id LEFT JOIN purchase_profiles pp ON pp.id=d.purchase_profile_id WHERE d.id=$1 FOR UPDATE OF d',
         [replacementId]
       );
-      if (!replacement.rowCount || replacement.rows[0].status !== 'in_stock' || replacement.rows[0].branch_id || replacement.rows[0].stock_consumed === true) {
+      if (!replacement.rowCount || !['in_stock', 'to_activate'].includes(replacement.rows[0].status) || replacement.rows[0].branch_id || replacement.rows[0].stock_consumed === true) {
         await client.query('ROLLBACK'); return fail(res, 409, 'Il sostitutivo selezionato non è più disponibile a magazzino.');
       }
       if (!replacementLocationId || String(replacement.rows[0].stock_location_id || '') !== String(replacementLocationId)) {
@@ -962,7 +962,7 @@ app.post('/devices', requireRole('admin', 'technician', 'warehouse'), async (req
     // quantity. Add it to the stock ledger so warehouse quantities and fault
     // replacement availability stay in sync. Order-linked devices are already
     // represented by the quantity loaded when the purchase order was recorded.
-    if (!purchaseProfileId && !branchId && status === 'in_stock' && stockLocationId) {
+    if (!purchaseProfileId && !branchId && ['in_stock', 'to_activate'].includes(status) && stockLocationId) {
       await client.query(
         'INSERT INTO product_stock(device_model_id, stock_location_id, quantity) VALUES ($1,$2,1) ON CONFLICT(device_model_id, stock_location_id) DO UPDATE SET quantity = product_stock.quantity + 1, updated_at = NOW()',
         [modelId, stockLocationId]
