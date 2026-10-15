@@ -808,7 +808,7 @@ app.post('/devices/:id/fault-events', requireRole('admin', 'technician', 'wareho
       if (!stock.rowCount || Number(stock.rows[0].quantity) < 1) { await client.query('ROLLBACK'); return fail(res, 409, 'Nessuna giacenza disponibile nel magazzino selezionato.'); }
       replacementHardwareCost = Number(stock.rows[0].unit_cost || 0);
       await client.query('UPDATE product_stock SET quantity=quantity-1, updated_at=NOW() WHERE device_model_id=$1 AND stock_location_id=$2', [replacementStockModelId, replacementLocationId]);
-      await client.query("INSERT INTO product_stock_movements(device_model_id,stock_location_id,quantity_delta,movement_type,notes,moved_by) VALUES($1,$2,-1,'fault_replacement',$3,$4)", [replacementStockModelId, replacementLocationId, 'Sostituzione device guasto #' + deviceId, req.user.id]);
+      await client.query("INSERT INTO product_stock_movements(device_model_id,stock_location_id,quantity_delta,movement_type,notes,moved_by) VALUES($1,$2,-1,'activation',$3,$4)", [replacementStockModelId, replacementLocationId, 'Sostituzione device guasto #' + deviceId, req.user.id]);
       const replacement = await client.query("INSERT INTO devices(model_id,branch_id,stock_location_id,status,ownership_type,purchase_cost,monthly_fee,stock_consumed,notes) VALUES($1,$2,$3,'to_activate','rental',$4,$5,TRUE,$6) RETURNING id", [replacementStockModelId, original.rows[0].branch_id, replacementLocationId, replacementHardwareCost, original.rows[0].monthly_fee ?? original.rows[0].default_monthly_fee ?? null, 'Sostitutivo da magazzino per guasto device #' + deviceId]);
       replacementId = replacement.rows[0].id;
     }
