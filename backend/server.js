@@ -877,6 +877,15 @@ app.delete('/purchase-profiles/:id', requireRole('admin'), async (req, res, next
   }
 });
 
+app.get('/devices-with-fault-history', async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT DISTINCT device_id FROM device_fault_events ORDER BY device_id`
+    );
+    res.json({ data: result.rows });
+  } catch (error) { next(error); }
+});
+
 app.get('/devices/:id/fault-events', async (req, res, next) => {
   const id = parseId(req.params.id);
   if (!id) return fail(res, 400, 'ID dispositivo non valido.');
