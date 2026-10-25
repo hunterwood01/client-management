@@ -889,13 +889,72 @@ app.get('/devices-with-fault-history', async (req, res, next) => {
 app.delete('/device-fault-events/:id', requireRole('admin', 'technician', 'warehouse'), async (req, res, next) => {
   const id = parseId(req.params.id);
   if (!id) return fail(res, 400, 'ID evento guasto non valido.');
+  const client = await pool.connect();
   try {
-    const result = await pool.query('DELETE FROM device_fault_events WHERE id=$1 RETURNING id', [id]);
-    if (!result.rowCount) return fail(res, 404, 'Evento guasto non trovato.');
-    res.json({ data: { id: result.rows[0].id, deleted: true } });
+    await client.query('BEGIN');
+    const eventResult = await client.query(
+      'SELECT * FROM device_fault_events WHERE id=$1 FOR UPDATE',
+      [id]
+    );
+    if (!eventResult.rowCount) {
+      await client.query('ROLLBACK');
+      return fail(res, 404, 'Evento guasto non trovato.');
+    }
+    const fault = eventResult.rows[0];
+
+    // Only remove a replacement device that was automatically created by this
+    // fault workflow from product stock. A pre-existing warehouse device must
+    // never be deleted as a side effect of removing a history entry.
+    if (fault.replacement_device_id) {
+      const replacementResult = await client.query(
+        'SELECT * FROM devices WHERE id=$1 FOR UPDATE',
+        [fault.replacement_device_id]
+      );
+      if (replacementResult.rowCount) {
+        const replacement = replacementResult.rows[0];
+        const autoCreatedForFault = String(replacement.notes || '').startsWith(
+          'Sostitutivo da magazzino per guasto device #' + fault.device_id
+        );
+        if (autoCreatedForFault) {
+          if (!replacement.model_id || !replacement.stock_location_id) {
+            await client.query('ROLLBACK');
+            return fail(res, 409, 'Impossibile annullare il sostitutivo: modello o magazzino non disponibili.');
+          }
+          await client.query(
+            'UPDATE product_stock SET quantity=quantity+1, updated_at=NOW() WHERE device_model_id=$1 AND stock_location_id=$2',
+            [replacement.model_id, replacement.stock_location_id]
+          );
+          await client.query(
+            "INSERT INTO product_stock_movements(device_model_id,stock_location_id,quantity_delta,movement_type,device_id,notes,moved_by) VALUES($1,$2,1,'adjustment',$3,$4,$5)",
+            [replacement.model_id, replacement.stock_location_id, replacement.id, 'Storno sostitutivo eliminato per annullamento guasto #' + id, req.user.id]
+          );
+          await client.query('DELETE FROM devices WHERE id=$1', [replacement.id]);
+        }
+      }
+    }
+
+    await client.query('DELETE FROM device_fault_events WHERE id=$1', [id]);
+
+    // If no other fault events remain for the original device, return it to
+    // operational status because this fault has been withdrawn.
+    const remaining = await client.query(
+      'SELECT 1 FROM device_fault_events WHERE device_id=$1 LIMIT 1',
+      [fault.device_id]
+    );
+    if (!remaining.rowCount) {
+      await client.query(
+        "UPDATE devices SET status='operational', updated_at=NOW() WHERE id=$1 AND status IN ('fault','decommissioned')",
+        [fault.device_id]
+      );
+    }
+    await client.query('COMMIT');
+    res.json({ data: { id, deleted: true, replacementDeleted: Boolean(fault.replacement_device_id) } });
   } catch (error) {
-    if (error.code === '23503') return fail(res, 409, 'Impossibile eliminare questo evento perché è ancora collegato ad altri dati.');
+    await client.query('ROLLBACK');
+    if (error.code === '23503') return fail(res, 409, 'Impossibile annullare il guasto perché il dispositivo sostitutivo è collegato ad altri dati. Verifica che non sia già in uso.');
     next(error);
+  } finally {
+    client.release();
   }
 });
 
