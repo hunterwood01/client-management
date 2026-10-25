@@ -46,7 +46,7 @@ export default function DeviceFaultManagement({ device, devices, locations, prod
   }
   async function deleteEvent(event) {
     const summary = new Date(String(event.fault_date || '').slice(0,10) + 'T12:00:00').toLocaleDateString('it-IT');
-    if (!window.confirm('Eliminare lo storico del guasto del ' + summary + '? I dispositivi e le giacenze di magazzino resteranno invariati.')) return;
+    if (!window.confirm('Annullare il guasto del ' + summary + '? Se era stato creato automaticamente un dispositivo sostitutivo, verrà eliminato e la giacenza di magazzino ripristinata. Il dispositivo originale verrà rimesso operativo se non ha altri eventi guasto.')) return;
     setError('');
     try {
       await api('/device-fault-events/' + event.id, { method: 'DELETE' });
