@@ -44,6 +44,19 @@ export default function DeviceFaultManagement({ device, devices, locations, prod
     } catch (err) { setError(err.message); }
     finally { setSaving(false); }
   }
+  async function deleteEvent(event) {
+    const summary = new Date(String(event.fault_date || '').slice(0,10) + 'T12:00:00').toLocaleDateString('it-IT');
+    if (!window.confirm('Eliminare lo storico del guasto del ' + summary + '? I dispositivi e le giacenze di magazzino resteranno invariati.')) return;
+    setError('');
+    try {
+      await api('/device-fault-events/' + event.id, { method: 'DELETE' });
+      if (String(editing) === String(event.id)) startNew();
+      await load();
+      await onSaved();
+    } catch (err) {
+      setError(err.message);
+    }
+  }
   const availableAtWarehouse = devices.filter(item =>
     String(item.id) !== String(device.id) &&
     ['in_stock', 'to_activate'].includes(item.status) &&
@@ -93,7 +106,7 @@ export default function DeviceFaultManagement({ device, devices, locations, prod
           </form>
         </section>
         <section className="panel"><div className="panel-heading"><div><h3>Storico guasti</h3><p>{events.length} eventi registrati</p></div></div>
-          {loading ? <p className="muted">Caricamento storico…</p> : events.length ? <div className="fault-event-list">{events.map(item => <article className="fault-event" key={item.id}><div className="fault-event-heading"><strong>{new Date(item.fault_date + 'T12:00:00').toLocaleDateString('it-IT')} · {outcomeLabel[item.outcome] || item.outcome}</strong><span className={'status-pill ' + (item.status === 'closed' ? 'status-operational' : 'status-fault')}>{item.status === 'closed' ? 'Chiuso' : 'Aperto'}</span></div><p>{item.description}</p>{item.rma_number && <small>RMA {item.rma_number} · {rmaLabel[item.rma_status] || item.rma_status}</small>}{item.replacement_serial && <small>Sostitutivo: {item.replacement_model} · {item.replacement_serial} (da attivare)</small>}<div className="fault-event-footer"><span>Hardware sostitutivo: {money(item.replacement_hardware_cost)} · Costi aggiuntivi: {money(item.additional_cost)}</span><button type="button" className="row-action" onClick={() => editEvent(item)}>Modifica</button></div>{item.notes && <small>{item.notes}</small>}</article>)}</div> : <p className="muted">Nessun guasto registrato per questo dispositivo.</p>}
+          {loading ? <p className="muted">Caricamento storico…</p> : events.length ? <div className="fault-event-list">{events.map(item => <article className="fault-event" key={item.id}><div className="fault-event-heading"><strong>{new Date(item.fault_date + 'T12:00:00').toLocaleDateString('it-IT')} · {outcomeLabel[item.outcome] || item.outcome}</strong><span className={'status-pill ' + (item.status === 'closed' ? 'status-operational' : 'status-fault')}>{item.status === 'closed' ? 'Chiuso' : 'Aperto'}</span></div><p>{item.description}</p>{item.rma_number && <small>RMA {item.rma_number} · {rmaLabel[item.rma_status] || item.rma_status}</small>}{item.replacement_serial && <small>Sostitutivo: {item.replacement_model} · {item.replacement_serial} (da attivare)</small>}<div className="fault-event-footer"><span>Hardware sostitutivo: {money(item.replacement_hardware_cost)} · Costi aggiuntivi: {money(item.additional_cost)}</span><button type="button" className="row-action" onClick={() => editEvent(item)}>Modifica</button><button type="button" className="row-action" onClick={() => deleteEvent(item)}>Elimina</button></div>{item.notes && <small>{item.notes}</small>}</article>)}</div> : <p className="muted">Nessun guasto registrato per questo dispositivo.</p>}
         </section>
       </div>
     </section>

@@ -886,6 +886,19 @@ app.get('/devices-with-fault-history', async (req, res, next) => {
   } catch (error) { next(error); }
 });
 
+app.delete('/device-fault-events/:id', requireRole('admin', 'technician', 'warehouse'), async (req, res, next) => {
+  const id = parseId(req.params.id);
+  if (!id) return fail(res, 400, 'ID evento guasto non valido.');
+  try {
+    const result = await pool.query('DELETE FROM device_fault_events WHERE id=$1 RETURNING id', [id]);
+    if (!result.rowCount) return fail(res, 404, 'Evento guasto non trovato.');
+    res.json({ data: { id: result.rows[0].id, deleted: true } });
+  } catch (error) {
+    if (error.code === '23503') return fail(res, 409, 'Impossibile eliminare questo evento perché è ancora collegato ad altri dati.');
+    next(error);
+  }
+});
+
 app.get('/devices/:id/fault-events', async (req, res, next) => {
   const id = parseId(req.params.id);
   if (!id) return fail(res, 400, 'ID dispositivo non valido.');
