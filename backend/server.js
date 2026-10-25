@@ -920,13 +920,17 @@ app.delete('/device-fault-events/:id', requireRole('admin', 'technician', 'wareh
             await client.query('ROLLBACK');
             return fail(res, 409, 'Impossibile annullare il sostitutivo: modello o magazzino non disponibili.');
           }
-          await client.query(
-            'UPDATE product_stock SET quantity=quantity+1, updated_at=NOW() WHERE device_model_id=$1 AND stock_location_id=$2',
+          const restoredStock = await client.query(
+            'UPDATE product_stock SET quantity=quantity+1, updated_at=NOW() WHERE device_model_id=$1 AND stock_location_id=$2 RETURNING quantity',
             [replacement.model_id, replacement.stock_location_id]
           );
+          if (!restoredStock.rowCount) {
+            await client.query('ROLLBACK');
+            return fail(res, 409, 'Impossibile ripristinare la giacenza del sostitutivo: riga di magazzino non trovata.');
+          }
           await client.query(
-            "INSERT INTO product_stock_movements(device_model_id,stock_location_id,quantity_delta,movement_type,device_id,notes,moved_by) VALUES($1,$2,1,'adjustment',$3,$4,$5)",
-            [replacement.model_id, replacement.stock_location_id, replacement.id, 'Storno sostitutivo eliminato per annullamento guasto #' + id, req.user.id]
+            "INSERT INTO product_stock_movements(device_model_id,stock_location_id,quantity_delta,movement_type,notes,moved_by) VALUES($1,$2,1,'adjustment',$3,$4)",
+            [replacement.model_id, replacement.stock_location_id, 'Storno sostitutivo eliminato per annullamento guasto #' + id, req.user.id]
           );
           await client.query('DELETE FROM devices WHERE id=$1', [replacement.id]);
         }
