@@ -901,6 +901,9 @@ app.delete('/device-fault-events/:id', requireRole('admin', 'technician', 'wareh
       return fail(res, 404, 'Evento guasto non trovato.');
     }
     const fault = eventResult.rows[0];
+    // Remove the event first because it references replacement_device_id.
+    // The transaction ensures all subsequent cleanup rolls back on failure.
+    await client.query('DELETE FROM device_fault_events WHERE id=$1', [id]);
     let replacementDeleted = false;
 
     // Only remove a replacement device that was automatically created by this
@@ -938,8 +941,6 @@ app.delete('/device-fault-events/:id', requireRole('admin', 'technician', 'wareh
         }
       }
     }
-
-    await client.query('DELETE FROM device_fault_events WHERE id=$1', [id]);
 
     // If no other fault events remain for the original device, return it to
     // operational status because this fault has been withdrawn.
