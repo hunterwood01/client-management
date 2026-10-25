@@ -911,7 +911,7 @@ app.post('/devices/:id/fault-events', requireRole('admin', 'technician', 'wareho
   if (!['pending','rma','sci','resolved'].includes(outcome) || !Number.isFinite(additionalCost) || additionalCost < 0) return fail(res, 400, 'Esito o costo aggiuntivo non valido.');
   if (req.body?.replacement_device_id && !replacementId) return fail(res, 400, 'Device sostitutivo non valido.');
   if (req.body?.replacement_stock_model_id && !replacementStockModelId) return fail(res, 400, 'Modello di magazzino non valido.');
-  if (replacementStockModelId && (!replacementLocationId || outcome === 'sci')) return fail(res, 400, 'Per prelevare un sostitutivo seleziona un magazzino e un esito diverso da SCI.');
+  if (replacementStockModelId && !replacementLocationId) return fail(res, 400, 'Per prelevare un sostitutivo seleziona un magazzino.');
   if (req.body?.replacement_stock_location_id && !replacementLocationId) return fail(res, 400, 'Magazzino sostitutivo non valido.');
   const client = await pool.connect();
   try {
