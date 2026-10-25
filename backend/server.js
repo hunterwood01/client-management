@@ -1744,23 +1744,19 @@ app.get('/finance/dashboard',async(req,res,next)=>{
     COALESCE((SELECT SUM(COALESCE(l.unit_cost,0)*COALESCE(l.quantity,1)) FROM license_purchase_orders l),0)
    ELSE
     COALESCE((
-     SELECT SUM(
-       (COALESCE(l.unit_cost,0)*COALESCE(l.quantity,1))
-       / NULLIF(g.duration_months,0)
-       / NULLIF(bc.active_count,0)
-     )
+     SELECT SUM(COALESCE(l.unit_cost,0)*COALESCE(l.quantity,1))
+       / NULLIF((SELECT bc.active_count
+                 FROM branch_counts bc
+                 WHERE bc.month_start=date_trunc('month',CURRENT_DATE)::date),0)
      FROM license_purchase_orders l
-     JOIN global_monthly_charges g ON g.license_order_id=l.id
-     JOIN LATERAL generate_series(
-       date_trunc('month',g.starts_on)::date,
-       date_trunc('month',CURRENT_DATE)::date,
-       INTERVAL '1 month'
-     ) month_row(month_start) ON month_row.month_start <
-       date_trunc('month',g.starts_on)::date + (g.duration_months * INTERVAL '1 month')
-     JOIN branch_counts bc ON bc.month_start=month_row.month_start
-     JOIN branch_month_activity selected_branch ON selected_branch.month_start=month_row.month_start
-       AND selected_branch.branch_id=$1 AND selected_branch.is_active=TRUE
-     WHERE l.allocation_mode='active_branches' AND bc.active_count>0
+     WHERE l.allocation_mode='active_branches'
+       AND EXISTS (
+         SELECT 1
+         FROM branch_month_activity selected_branch
+         WHERE selected_branch.month_start=date_trunc('month',CURRENT_DATE)::date
+           AND selected_branch.branch_id=$1
+           AND selected_branch.is_active=TRUE
+       )
     ),0)
    END::numeric AS license_costs,
    COALESCE((SELECT SUM(fe.amount) FROM finance_entries fe WHERE fe.entry_type IN ('service','other') AND ($1::bigint IS NULL OR fe.branch_id=$1)),0)::numeric AS other_costs
