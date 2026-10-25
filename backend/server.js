@@ -901,6 +901,7 @@ app.delete('/device-fault-events/:id', requireRole('admin', 'technician', 'wareh
       return fail(res, 404, 'Evento guasto non trovato.');
     }
     const fault = eventResult.rows[0];
+    let replacementDeleted = false;
 
     // Only remove a replacement device that was automatically created by this
     // fault workflow from product stock. A pre-existing warehouse device must
@@ -933,6 +934,7 @@ app.delete('/device-fault-events/:id', requireRole('admin', 'technician', 'wareh
             [replacement.model_id, replacement.stock_location_id, 'Storno sostitutivo eliminato per annullamento guasto #' + id, req.user.id]
           );
           await client.query('DELETE FROM devices WHERE id=$1', [replacement.id]);
+          replacementDeleted = true;
         }
       }
     }
@@ -952,7 +954,7 @@ app.delete('/device-fault-events/:id', requireRole('admin', 'technician', 'wareh
       );
     }
     await client.query('COMMIT');
-    res.json({ data: { id, deleted: true, replacementDeleted: Boolean(fault.replacement_device_id) } });
+    res.json({ data: { id, deleted: true, replacementDeleted } });
   } catch (error) {
     await client.query('ROLLBACK');
     if (error.code === '23503') return fail(res, 409, 'Impossibile annullare il guasto perché il dispositivo sostitutivo è collegato ad altri dati. Verifica che non sia già in uso.');
