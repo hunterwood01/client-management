@@ -1299,12 +1299,13 @@ app.post('/license-purchase-orders', requireRole('admin'), async (req, res, next
   const quantity = Number(req.body?.quantity ?? 1);
   const unitCost = req.body?.unit_cost === '' || req.body?.unit_cost === undefined ? null : Number(req.body.unit_cost);
   const notes = cleanString(req.body?.notes, 10000);
-  if (!licenseName || !Number.isFinite(eaMonthlyRevenue) || eaMonthlyRevenue < 0 || !Number.isFinite(eaMonthlyCost) || eaMonthlyCost < 0 || [licenseName, supplier, reference, notes].includes(undefined) || !Number.isInteger(quantity) || quantity < 1 || quantity > 100000) return fail(res, 400, 'Licenza, quantità o campi non validi.');
+  const allocationMode = req.body?.allocation_mode === 'active_branches' ? 'active_branches' : req.body?.allocation_mode === 'none' || req.body?.allocation_mode == null ? 'none' : null;
+  if (!licenseName || !Number.isFinite(eaMonthlyRevenue) || eaMonthlyRevenue < 0 || !Number.isFinite(eaMonthlyCost) || eaMonthlyCost < 0 || [licenseName, supplier, reference, notes].includes(undefined) || !Number.isInteger(quantity) || quantity < 1 || quantity > 100000 || allocationMode === null) return fail(res, 400, 'Licenza, ripartizione, quantità o campi non validi.');
   if (unitCost !== null && (!Number.isFinite(unitCost) || unitCost < 0)) return fail(res, 400, 'Il costo unitario deve essere valido e non negativo.');
   try {
     const result = await pool.query(
-      'INSERT INTO license_purchase_orders(license_name, supplier, reference, purchased_on, quantity, unit_cost, renewal_on, notes, ea_monthly_revenue, ea_monthly_cost, ea_starts_on) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *',
-      [licenseName, supplier, reference, purchasedOn, quantity, unitCost, renewalOn, notes, eaMonthlyRevenue, eaMonthlyCost, eaStartsOn]
+      'INSERT INTO license_purchase_orders(license_name, supplier, reference, purchased_on, quantity, unit_cost, renewal_on, notes, ea_monthly_revenue, ea_monthly_cost, ea_starts_on, allocation_mode) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *',
+      [licenseName, supplier, reference, purchasedOn, quantity, unitCost, renewalOn, notes, eaMonthlyRevenue, eaMonthlyCost, eaStartsOn, allocationMode]
     );
     await syncLicenseOrderCharge(pool, result.rows[0]);
     res.status(201).json({ data: result.rows[0] });
@@ -1324,12 +1325,13 @@ app.put('/license-purchase-orders/:id', requireRole('admin'), async (req, res, n
   const quantity = Number(req.body?.quantity);
   const unitCost = req.body?.unit_cost === '' || req.body?.unit_cost === undefined ? null : Number(req.body.unit_cost);
   const notes = cleanString(req.body?.notes, 10000);
-  if (!id || !licenseName || [licenseName, supplier, reference, notes].includes(undefined) || !Number.isInteger(quantity) || quantity < 1 || quantity > 100000) return fail(res, 400, 'Licenza, quantità o campi non validi.');
+  const allocationMode = req.body?.allocation_mode === 'active_branches' ? 'active_branches' : req.body?.allocation_mode === 'none' || req.body?.allocation_mode == null ? 'none' : null;
+  if (!id || !licenseName || [licenseName, supplier, reference, notes].includes(undefined) || !Number.isInteger(quantity) || quantity < 1 || quantity > 100000 || allocationMode === null) return fail(res, 400, 'Licenza, ripartizione, quantità o campi non validi.');
   if (unitCost !== null && (!Number.isFinite(unitCost) || unitCost < 0)) return fail(res, 400, 'Il costo unitario deve essere valido e non negativo.');
   try {
     const result = await pool.query(
-      'UPDATE license_purchase_orders SET license_name=$1, supplier=$2, reference=$3, purchased_on=$4, quantity=$5, unit_cost=$6, renewal_on=$7, notes=$8, ea_monthly_revenue=$9, ea_monthly_cost=$10, ea_starts_on=$11, updated_at=NOW() WHERE id=$12 RETURNING *',
-      [licenseName, supplier, reference, purchasedOn, quantity, unitCost, renewalOn, notes, eaMonthlyRevenue, eaMonthlyCost, eaStartsOn, id]
+      'UPDATE license_purchase_orders SET license_name=$1, supplier=$2, reference=$3, purchased_on=$4, quantity=$5, unit_cost=$6, renewal_on=$7, notes=$8, ea_monthly_revenue=$9, ea_monthly_cost=$10, ea_starts_on=$11, allocation_mode=$12, updated_at=NOW() WHERE id=$13 RETURNING *',
+      [licenseName, supplier, reference, purchasedOn, quantity, unitCost, renewalOn, notes, eaMonthlyRevenue, eaMonthlyCost, eaStartsOn, allocationMode, id]
     );
     if (!result.rowCount) return fail(res, 404, 'Ordine licenze non trovato.');
     await syncLicenseOrderCharge(pool, result.rows[0]);
@@ -1616,7 +1618,8 @@ app.get('/license-finance', requireRole('admin'), async (_req, res, next) => {
           const activeBranches = activeBranchesAt(m);
           const canonePerBranch = Number(charge?.monthly_amount || 0);
           const monthlyInvestmentCost = (end > start ? investment / (end - start) : 0);
-          const allocatedCostPerBranch = activeBranches > 0 ? monthlyInvestmentCost / activeBranches : 0;
+          const allocatedCostPerBranch = order.allocation_mode === 'active_branches' && activeBranches > 0
+            ? monthlyInvestmentCost / activeBranches : 0;
           const monthlyRevenue = canonePerBranch * activeBranches;
           const monthlyCost = monthlyInvestmentCost;
           const netContribution = monthlyRevenue - monthlyCost;
@@ -1741,12 +1744,23 @@ app.get('/finance/dashboard',async(req,res,next)=>{
     COALESCE((SELECT SUM(COALESCE(l.unit_cost,0)*COALESCE(l.quantity,1)) FROM license_purchase_orders l),0)
    ELSE
     COALESCE((
-     SELECT SUM((COALESCE(l.unit_cost,0)*COALESCE(l.quantity,1))/NULLIF(bc.active_count,0))
+     SELECT SUM(
+       (COALESCE(l.unit_cost,0)*COALESCE(l.quantity,1))
+       / NULLIF(g.duration_months,0)
+       / NULLIF(bc.active_count,0)
+     )
      FROM license_purchase_orders l
-     JOIN branch_counts bc ON bc.month_start=date_trunc('month',COALESCE(l.ea_starts_on,l.purchased_on,DATE '2026-10-01'))::date
-     JOIN branch_month_activity selected_branch ON selected_branch.month_start=bc.month_start
+     JOIN global_monthly_charges g ON g.license_order_id=l.id
+     JOIN LATERAL generate_series(
+       date_trunc('month',g.starts_on)::date,
+       date_trunc('month',CURRENT_DATE)::date,
+       INTERVAL '1 month'
+     ) month_row(month_start) ON month_row.month_start <
+       date_trunc('month',g.starts_on)::date + (g.duration_months * INTERVAL '1 month')
+     JOIN branch_counts bc ON bc.month_start=month_row.month_start
+     JOIN branch_month_activity selected_branch ON selected_branch.month_start=month_row.month_start
        AND selected_branch.branch_id=$1 AND selected_branch.is_active=TRUE
-     WHERE bc.active_count>0
+     WHERE l.allocation_mode='active_branches' AND bc.active_count>0
     ),0)
    END::numeric AS license_costs,
    COALESCE((SELECT SUM(fe.amount) FROM finance_entries fe WHERE fe.entry_type IN ('service','other') AND ($1::bigint IS NULL OR fe.branch_id=$1)),0)::numeric AS other_costs
