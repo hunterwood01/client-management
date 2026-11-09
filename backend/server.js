@@ -1465,6 +1465,66 @@ app.get('/product-stock',async(_req,res,next)=>{
  }catch(error){next(error);}
 });
 
+app.get('/branches/:id/product-stock', async (req, res, next) => {
+  const branchId = parseId(req.params.id);
+  if (!branchId) return fail(res, 400, 'ID filiale non valido.');
+  try {
+    const result = await pool.query(`
+      SELECT bps.*, dm.manufacturer, dm.model_name, dm.sku, dm.category
+      FROM branch_product_stock bps
+      JOIN device_models dm ON dm.id = bps.device_model_id
+      WHERE bps.branch_id = $1 AND bps.quantity > 0
+      ORDER BY dm.category, dm.manufacturer, dm.model_name
+    `, [branchId]);
+    res.json({ data: result.rows });
+  } catch (error) { next(error); }
+});
+
+app.post('/branches/:id/product-stock', requireRole('admin', 'warehouse', 'technician'), async (req, res, next) => {
+  const branchId = parseId(req.params.id);
+  const modelId = parseId(req.body?.device_model_id);
+  const locationId = parseId(req.body?.stock_location_id);
+  const quantity = Number(req.body?.quantity);
+  if (!branchId || !modelId || !locationId || !Number.isInteger(quantity) || quantity < 1) {
+    return fail(res, 400, 'Filiale, prodotto, magazzino e quantità valida sono obbligatori.');
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const branch = await client.query('SELECT id FROM branches WHERE id=$1', [branchId]);
+    if (!branch.rowCount) { await client.query('ROLLBACK'); return fail(res, 404, 'Filiale non trovata.'); }
+    const stock = await client.query(
+      'SELECT quantity FROM product_stock WHERE device_model_id=$1 AND stock_location_id=$2 FOR UPDATE',
+      [modelId, locationId]
+    );
+    if (!stock.rowCount || Number(stock.rows[0].quantity) < quantity) {
+      await client.query('ROLLBACK');
+      return fail(res, 409, 'Quantità disponibile insufficiente nel magazzino selezionato.');
+    }
+    await client.query(
+      'UPDATE product_stock SET quantity=quantity-$1, updated_at=NOW() WHERE device_model_id=$2 AND stock_location_id=$3',
+      [quantity, modelId, locationId]
+    );
+    const assigned = await client.query(`
+      INSERT INTO branch_product_stock(branch_id, device_model_id, quantity)
+      VALUES ($1,$2,$3)
+      ON CONFLICT (branch_id, device_model_id)
+      DO UPDATE SET quantity=branch_product_stock.quantity+EXCLUDED.quantity, updated_at=NOW()
+      RETURNING *
+    `, [branchId, modelId, quantity]);
+    await client.query(
+      "INSERT INTO product_stock_movements(device_model_id,stock_location_id,quantity_delta,movement_type,notes,moved_by) VALUES($1,$2,$3,'adjustment',$4,$5)",
+      [modelId, locationId, -quantity, 'Assegnazione quantità alla filiale ' + branchId, req.user.id]
+    );
+    await client.query('COMMIT');
+    res.status(201).json({ data: assigned.rows[0] });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    if (error.code === '23503') return fail(res, 400, 'Prodotto, filiale o magazzino non valido.');
+    next(error);
+  } finally { client.release(); }
+});
+
 app.post('/devices/:id/activate',requireRole('admin','technician','warehouse'),async(req,res,next)=>{
  const id=parseId(req.params.id),branchId=parseId(req.body?.branch_id),ownership=req.body?.ownership_type;
  const salePrice=req.body?.sale_price===''||req.body?.sale_price===undefined?null:Number(req.body.sale_price),activatedOn=req.body?.activated_on||new Date().toISOString().slice(0,10);
