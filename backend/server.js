@@ -1527,6 +1527,72 @@ app.post('/branches/:id/product-stock', requireRole('admin', 'warehouse', 'techn
   } finally { client.release(); }
 });
 
+app.patch('/branches/:id/product-stock/:modelId', requireRole('admin', 'warehouse', 'technician'), async (req, res, next) => {
+  const branchId = parseId(req.params.id);
+  const modelId = parseId(req.params.modelId);
+  const locationId = parseId(req.body?.stock_location_id);
+  const delta = Number(req.body?.quantity_delta);
+  if (!branchId || !modelId || !locationId || !Number.isInteger(delta) || delta === 0) {
+    return fail(res, 400, 'Filiale, prodotto, magazzino e rettifica quantità valida sono obbligatori.');
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const current = await client.query(
+      'SELECT quantity FROM branch_product_stock WHERE branch_id=$1 AND device_model_id=$2 FOR UPDATE',
+      [branchId, modelId]
+    );
+    const currentQuantity = current.rowCount ? Number(current.rows[0].quantity) : 0;
+    if (currentQuantity + delta < 0) {
+      await client.query('ROLLBACK');
+      return fail(res, 409, 'La rettifica supera la quantità presente in filiale.');
+    }
+
+    if (delta > 0) {
+      const warehouse = await client.query(
+        'SELECT quantity FROM product_stock WHERE device_model_id=$1 AND stock_location_id=$2 FOR UPDATE',
+        [modelId, locationId]
+      );
+      if (!warehouse.rowCount || Number(warehouse.rows[0].quantity) < delta) {
+        await client.query('ROLLBACK');
+        return fail(res, 409, 'Quantità disponibile insufficiente nel magazzino selezionato.');
+      }
+      await client.query(
+        'UPDATE product_stock SET quantity=quantity-$1, updated_at=NOW() WHERE device_model_id=$2 AND stock_location_id=$3',
+        [delta, modelId, locationId]
+      );
+    } else {
+      await client.query(
+        'INSERT INTO product_stock(device_model_id,stock_location_id,quantity) VALUES($1,$2,$3) ON CONFLICT (device_model_id,stock_location_id) DO UPDATE SET quantity=product_stock.quantity+EXCLUDED.quantity,updated_at=NOW()',
+        [modelId, locationId, -delta]
+      );
+    }
+
+    let updated;
+    if (current.rowCount) {
+      updated = await client.query(
+        'UPDATE branch_product_stock SET quantity=$1,updated_at=NOW() WHERE branch_id=$2 AND device_model_id=$3 RETURNING *',
+        [currentQuantity + delta, branchId, modelId]
+      );
+    } else {
+      updated = await client.query(
+        'INSERT INTO branch_product_stock(branch_id,device_model_id,quantity) VALUES($1,$2,$3) RETURNING *',
+        [branchId, modelId, delta]
+      );
+    }
+    await client.query(
+      "INSERT INTO product_stock_movements(device_model_id,stock_location_id,quantity_delta,movement_type,notes,moved_by) VALUES($1,$2,$3,'adjustment',$4,$5)",
+      [modelId, locationId, -delta, 'Rettifica quantità assegnata alla filiale ' + branchId, req.user.id]
+    );
+    await client.query('COMMIT');
+    res.json({ data: updated.rows[0] });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    if (error.code === '23503') return fail(res, 400, 'Prodotto, filiale o magazzino non valido.');
+    next(error);
+  } finally { client.release(); }
+});
+
 app.post('/devices/:id/activate',requireRole('admin','technician','warehouse'),async(req,res,next)=>{
  const id=parseId(req.params.id),branchId=parseId(req.body?.branch_id),ownership=req.body?.ownership_type;
  const salePrice=req.body?.sale_price===''||req.body?.sale_price===undefined?null:Number(req.body.sale_price),activatedOn=req.body?.activated_on||new Date().toISOString().slice(0,10);
