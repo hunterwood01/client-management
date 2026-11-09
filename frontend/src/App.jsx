@@ -320,7 +320,7 @@ function Modal({ title, subtitle, onClose, children }) {
   return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="modal" role="dialog" aria-modal="true" aria-label={title}><header className="modal-header"><div><h2>{title}</h2>{subtitle && <p>{subtitle}</p>}</div><button className="icon-button" onClick={onClose} aria-label="Chiudi">×</button></header>{children}</section></div>;
 }
 
-function BranchQuantityStock({ branch, models, locations, devices, onChanged, onEditDevice, onRemoveDevice, onEditQuantity, onRemoveQuantity }) {
+function BranchQuantityStock({ branch, models, locations, devices, onChanged, onEditDevice, onRemoveDevice, onEditQuantity, onRemoveQuantity, chooseWarehouse }) {
   const [rows, setRows] = useState([]);
   const [modelId, setModelId] = useState('');
   const [locationId, setLocationId] = useState('');
@@ -328,6 +328,8 @@ function BranchQuantityStock({ branch, models, locations, devices, onChanged, on
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [detailRow, setDetailRow] = useState(null);
+  const [detailLocationId, setDetailLocationId] = useState('');
+  const [savingDetailLocation, setSavingDetailLocation] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -342,10 +344,33 @@ function BranchQuantityStock({ branch, models, locations, devices, onChanged, on
     event.preventDefault();
     setBusy(true); setError('');
     try {
-      await api('/branches/' + branch.id + '/product-stock', {
-        method: 'POST',
-        body: JSON.stringify({ device_model_id: Number(modelId), stock_location_id: Number(locationId), quantity: Number(quantity) })
-      });
+      const selectedLocation = locations.find((location) => String(location.id) === String(locationId));
+      try {
+        await api('/branches/' + branch.id + '/product-stock', {
+          method: 'POST',
+          body: JSON.stringify({ device_model_id: Number(modelId), stock_location_id: Number(locationId), quantity: Number(quantity) })
+        });
+      } catch (err) {
+        if (!/insufficient|insufficiente/i.test(err.message || '')) throw err;
+        const stockResult = await api('/product-stock');
+        const availability = (stockResult.data || [])
+          .filter((item) => Number(item.device_model_id) === Number(modelId))
+          .map((item) => ({ locationId: Number(item.stock_location_id), name: item.stock_location_name, available: Number(item.available_quantity ?? item.quantity ?? 0) }))
+          .sort((a, b) => a.name.localeCompare(b.name, 'it'));
+        if (!availability.length) throw new Error('Nessuna disponibilità di questo prodotto nei magazzini.');
+        const alternate = await chooseWarehouse(
+          availability,
+          'Il magazzino selezionato (' + (selectedLocation?.name || '—') + ') non ha ' + quantity + ' unità disponibili. Scegli un magazzino alternativo:',
+          availability.find((item) => item.locationId !== Number(locationId))?.locationId
+        );
+        if (!alternate) return;
+        if (!alternate) throw new Error('Selezione magazzino non valida.');
+        if (alternate.available < Number(quantity)) throw new Error('Disponibilità insufficiente nel magazzino scelto (' + alternate.available + ' unità).');
+        await api('/branches/' + branch.id + '/product-stock', {
+          method: 'POST',
+          body: JSON.stringify({ device_model_id: Number(modelId), stock_location_id: alternate.locationId, quantity: Number(quantity) })
+        });
+      }
       setModelId('');
       setQuantity('1');
       await load();
@@ -409,12 +434,31 @@ function BranchQuantityStock({ branch, models, locations, devices, onChanged, on
           <label>Categoria<input readOnly value={detailRow.category || '—'} /></label>
           <label>Quantità assegnata<input readOnly value={String(detailRow.quantity ?? 0)} /></label>
           <label>Filiale<input readOnly value={branch.nomenclature || branch.company_name || ('Filiale #' + branch.id)} /></label>
+          <label className="span-two">Magazzino di ubicazione
+            <select value={detailLocationId} onChange={(event) => setDetailLocationId(event.target.value)} required>
+              <option value="">Seleziona magazzino</option>
+              {locations.map((location) => <option key={location.id} value={String(location.id)}>{location.name}</option>)}
+            </select>
+          </label>
         </div>
-        <div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setDetailRow(null)}>Chiudi</button><button type="button" className="primary-button" onClick={() => { const row = detailRow; setDetailRow(null); onEditQuantity?.(row); }}>Modifica quantità</button></div>
+        <div className="modal-actions">
+          <button type="button" className="secondary-button" onClick={() => setDetailRow(null)}>Chiudi</button>
+          <button type="button" className="secondary-button" disabled={savingDetailLocation || !detailLocationId || String(detailRow.stock_location_id || '') === detailLocationId} onClick={async () => {
+            setSavingDetailLocation(true); setError('');
+            try {
+              await api('/branches/' + branch.id + '/product-stock/' + detailRow.device_model_id + '/location', { method: 'PATCH', body: JSON.stringify({ stock_location_id: Number(detailLocationId) }) });
+              await onChanged?.();
+              setDetailRow({ ...detailRow, stock_location_id: Number(detailLocationId), stock_location_name: locations.find((location) => String(location.id) === detailLocationId)?.name || '' });
+              setSuccess('Magazzino di ubicazione aggiornato.');
+            } catch (err) { setError(err.message); }
+            finally { setSavingDetailLocation(false); }
+          }}>{savingDetailLocation ? 'Salvataggio…' : 'Salva magazzino'}</button>
+          <button type="button" className="primary-button" onClick={() => { const row = detailRow; setDetailRow(null); onEditQuantity?.(row); }}>Modifica quantità</button>
+        </div>
       </div>
     </Modal>}
     {error && <p role="alert" className="form-error">{error}</p>}
-    {unifiedRows.length ? <div className="table-panel nested-table"><table><thead><tr><th>SKU</th><th>Prodotto</th><th>Seriale / tag</th><th>Tipologia</th><th>Quantità</th><th>Stato</th><th>Azioni</th></tr></thead><tbody>{unifiedRows.map((row) => <tr key={row.id}><td>{row.sku || '—'}</td><td>{row.product.trim()}</td><td>{row.serial}</td><td>{row.kind}</td><td>{row.quantity}</td><td>{row.status}</td><td>{row.device ? <div className="row-actions"><button type="button" className="row-action" onClick={() => onEditDevice?.(row.device)}>Modifica</button><button type="button" className="row-action danger" disabled={busy} onClick={() => onRemoveDevice?.(row.device)}>Rimuovi</button></div> : row.stockRow ? <div className="row-actions"><button type="button" className="row-action" onClick={() => setDetailRow(row.stockRow)}>Dettagli</button><button type="button" className="row-action" disabled={busy} onClick={() => onEditQuantity?.(row.stockRow)}>Modifica quantità</button><button type="button" className="row-action danger" disabled={busy} onClick={() => onRemoveQuantity?.(row.stockRow)}>Rimuovi</button></div> : '—'}</td></tr>)}</tbody></table></div> : <p className="muted">Nessun dispositivo associato a questa filiale.</p>}
+    {unifiedRows.length ? <div className="table-panel nested-table"><table><thead><tr><th>SKU</th><th>Prodotto</th><th>Seriale / tag</th><th>Tipologia</th><th>Quantità</th><th>Stato</th><th>Azioni</th></tr></thead><tbody>{unifiedRows.map((row) => <tr key={row.id}><td>{row.sku || '—'}</td><td>{row.product.trim()}</td><td>{row.serial}</td><td>{row.kind}</td><td>{row.quantity}</td><td>{row.status}</td><td>{row.device ? <div className="row-actions"><button type="button" className="row-action" onClick={() => onEditDevice?.(row.device)}>Modifica</button><button type="button" className="row-action danger" disabled={busy} onClick={() => onRemoveDevice?.(row.device)}>Rimuovi</button></div> : row.stockRow ? <div className="row-actions"><button type="button" className="row-action" onClick={() => { setDetailRow(row.stockRow); setDetailLocationId(row.stockRow.stock_location_id ? String(row.stockRow.stock_location_id) : ''); }}>Dettagli</button><button type="button" className="row-action" disabled={busy} onClick={() => onEditQuantity?.(row.stockRow)}>Modifica quantità</button><button type="button" className="row-action danger" disabled={busy} onClick={() => onRemoveQuantity?.(row.stockRow)}>Rimuovi</button></div> : '—'}</td></tr>)}</tbody></table></div> : <p className="muted">Nessun dispositivo associato a questa filiale.</p>}
   </section>;
 }
 
@@ -456,6 +500,7 @@ export default function App() {
   const [search, setSearch] = useState('');
   const [branchSort, setBranchSort] = useState({ key: 'company_name', direction: 'asc' });
   const [modal, setModal] = useState('');
+  const [warehousePicker, setWarehousePicker] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
@@ -555,23 +600,60 @@ export default function App() {
     setModal('editDevice:' + device.id);
   }
 
+  function chooseWarehouse(options, title, selectedId) {
+    return new Promise((resolve) => {
+      setWarehousePicker({ options, title, selectedId: String(selectedId ?? options[0]?.locationId ?? ''), resolve });
+    });
+  }
+
   async function editBranchProductQuantity(row) {
     const value = window.prompt('Nuova quantità per ' + row.manufacturer + ' ' + row.model_name + ':', String(row.quantity));
     if (value === null) return;
     const newQuantity = Number(value);
     if (!Number.isInteger(newQuantity) || newQuantity < 0) { setError('Inserisci una quantità intera maggiore o uguale a zero.'); return; }
-    const locationOptions = locations.map((location, index) => (index + 1) + '. ' + location.name).join('\\n');
-    const choice = window.prompt('Seleziona il magazzino per registrare la rettifica (numero):\\n' + locationOptions, '1');
-    if (choice === null) return;
-    const selectedLocation = locations[Number(choice) - 1];
-    if (!selectedLocation) { setError('Magazzino non valido.'); return; }
+    const stockResult = await api('/product-stock');
+    const availability = (stockResult.data || [])
+      .filter((item) => Number(item.device_model_id) === Number(row.device_model_id))
+      .map((item) => ({ locationId: Number(item.stock_location_id), name: item.stock_location_name, available: Number(item.available_quantity ?? item.quantity ?? 0) }));
+    const locationChoices = locations.map((location) => ({
+      locationId: Number(location.id),
+      name: location.name,
+      available: availability.find((item) => item.locationId === Number(location.id))?.available ?? 0
+    }));
+    const selectedLocation = await chooseWarehouse(
+      locationChoices,
+      'Scegli il magazzino per registrare la rettifica della quantità:',
+      row.stock_location_id || locations[0]?.id
+    );
+    if (!selectedLocation) return;
     const delta = newQuantity - Number(row.quantity);
     if (delta === 0) return;
     setBusy(true); setError(''); setSuccess('');
     try {
-      await api('/branches/' + selectedBranch.id + '/product-stock/' + row.device_model_id, {
-        method: 'PATCH', body: JSON.stringify({ quantity_delta: delta, stock_location_id: Number(selectedLocation.id) })
-      });
+      try {
+        await api('/branches/' + selectedBranch.id + '/product-stock/' + row.device_model_id, {
+          method: 'PATCH', body: JSON.stringify({ quantity_delta: delta, stock_location_id: Number(selectedLocation.id) })
+        });
+      } catch (err) {
+        if (delta <= 0 || !/insufficient|insufficiente/i.test(err.message || '')) throw err;
+        const stockResult = await api('/product-stock');
+        const availability = (stockResult.data || [])
+          .filter((item) => Number(item.device_model_id) === Number(row.device_model_id))
+          .map((item) => ({ locationId: Number(item.stock_location_id), name: item.stock_location_name, available: Number(item.available_quantity ?? item.quantity ?? 0) }))
+          .sort((a, b) => a.name.localeCompare(b.name, 'it'));
+        if (!availability.length) throw new Error('Nessuna disponibilità di questo prodotto nei magazzini.');
+        const alternate = await chooseWarehouse(
+          availability,
+          'Il magazzino selezionato (' + selectedLocation.name + ') non ha ' + delta + ' unità disponibili. Scegli un magazzino alternativo:',
+          availability.find((item) => item.locationId !== Number(selectedLocation.id))?.locationId
+        );
+        if (!alternate) return;
+        if (!alternate) throw new Error('Selezione magazzino non valida.');
+        if (alternate.available < delta) throw new Error('Disponibilità insufficiente nel magazzino scelto (' + alternate.available + ' unità).');
+        await api('/branches/' + selectedBranch.id + '/product-stock/' + row.device_model_id, {
+          method: 'PATCH', body: JSON.stringify({ quantity_delta: delta, stock_location_id: alternate.locationId })
+        });
+      }
       await loadData();
       setSuccess('Quantità aggiornata.');
     } catch (err) { setError(err.message); }
@@ -580,11 +662,12 @@ export default function App() {
 
   async function removeBranchProductQuantity(row) {
     if (!window.confirm('Rimuovere tutte le ' + row.quantity + ' unità di ' + row.manufacturer + ' ' + row.model_name + ' dalla filiale?')) return;
-    const locationOptions = locations.map((location, index) => (index + 1) + '. ' + location.name).join('\\n');
-    const choice = window.prompt('Seleziona il magazzino in cui rientrano le unità (numero):\\n' + locationOptions, '1');
-    if (choice === null) return;
-    const selectedLocation = locations[Number(choice) - 1];
-    if (!selectedLocation) { setError('Magazzino non valido.'); return; }
+    const selectedLocation = await chooseWarehouse(
+      locations.map((location) => ({ locationId: Number(location.id), name: location.name })),
+      'Scegli il magazzino in cui far rientrare le unità:',
+      row.stock_location_id || locations[0]?.id
+    );
+    if (!selectedLocation) return;
     setBusy(true); setError(''); setSuccess('');
     try {
       await api('/branches/' + selectedBranch.id + '/product-stock/' + row.device_model_id, {
@@ -989,7 +1072,7 @@ export default function App() {
 
           {page === 'branches' && <section className="page-content"><div className="page-intro"><div><p className="eyebrow">ANAGRAFICA</p><h2>Le tue filiali</h2><p className="muted">Anagrafica delle filiali: ragione sociale, nuova nomenclatura, paese, indirizzo, prefisso, LAN e WLC.</p></div><div className="page-actions"><button className="secondary-button" onClick={() => downloadCsv("filiali-" + new Date().toISOString().slice(0,10) + ".csv", [{label:"Ragione sociale",value:(row)=>row.company_name},{label:"Paese",value:(row)=>row.country},{label:"Indirizzo",value:(row)=>row.street},{label:"Nomenclatura",value:(row)=>row.nomenclature},{label:"Vecchia nomenclatura",value:(row)=>row.previous_nomenclature},{label:"Prefisso",value:(row)=>row.phone_prefix},{label:"LAN",value:(row)=>row.network},{label:"WLC",value:(row)=>row.wlc},{label:"Attiva",value:(row)=>row.is_active ? "Sì" : "No"},{label:"Attiva dal",value:(row)=>row.active_since}], filteredBranches)}>Esporta CSV</button><label className="secondary-button file-import-button">Importa CSV NETWORK<input type="file" accept=".csv,text/csv" hidden disabled={busy} onChange={(event) => { const file = event.target.files?.[0]; if (file) importNetworkCsv(file); event.target.value = ''; }} /></label><button className="primary-button" onClick={() => { setBranchForm(emptyBranch); setModal('branch'); }}>＋ Nuova filiale</button></div></div><div className="toolbar"><label className="search-box"><span>⌕</span><input placeholder="Cerca ragione sociale, paese, indirizzo, network…" value={search} onChange={(event) => setSearch(event.target.value)} /></label><span className="result-count">{filteredBranches.length} filiali</span></div><div className="table-panel"><table><thead><tr>{[['company_name','Ragione sociale'],['country','Paese'],['street','Indirizzo'],['phone_prefix','Prefisso'],['network','LAN'],['wlc','WLC']].map(([key,label]) => <th key={key}><button type="button" className="table-sort-button" onClick={() => setBranchSort((current) => ({ key, direction: current.key === key && current.direction === 'asc' ? 'desc' : 'asc' }))}>{label}<span aria-hidden="true">{branchSort.key === key ? (branchSort.direction === 'asc' ? ' ↑' : ' ↓') : ' ↕'}</span></button></th>)}<th /></tr></thead><tbody>{filteredBranches.map((branch) => <tr key={branch.id} onClick={() => openBranch(branch)} className="clickable-row"><td><strong>{branch.company_name}</strong><small>{branch.nomenclature || 'Nomenclatura non impostata'}</small></td><td>{branch.country || '—'}</td><td className="branch-address-cell">{branch.street || '—'}</td><td>{branch.phone_prefix || '—'}</td><td><span className="soft-tag">{branch.network || '—'}</span></td><td>{branch.wlc || '—'}</td><td><div className="row-actions"><button className="row-action" onClick={(event) => { event.stopPropagation(); openBranch(branch); }}>Apri →</button>{user.role === 'admin' && <button className="row-action" disabled={busy} onClick={(event) => { event.stopPropagation(); deleteBranch(branch); }}>Elimina</button>}</div></td></tr>)}</tbody></table>{!filteredBranches.length && <EmptyState icon="⌂" title="Nessuna filiale presente" description="Crea una filiale per iniziare a organizzare il workspace." />}</div></section>}
 
-          {page === 'branchDetail' && selectedBranch && <section className="page-content"><button className="back-link" onClick={() => setPage('branches')}>← Torna alle filiali</button><div className="detail-heading"><div className="branch-emblem">⌂</div><div><p className="eyebrow">SCHEDA FILIALE</p><h2>{selectedBranch.nomenclature || selectedBranch.street}</h2><p className="muted">{selectedBranch.company_name} · {selectedBranch.country} · {selectedBranch.street ? 'Via ' + selectedBranch.street : ''}</p></div><button className="secondary-button" onClick={() => { setBranchForm({ company_id: String(selectedBranch.company_id), country: selectedBranch.country || '', street: selectedBranch.street || '', nomenclature: selectedBranch.nomenclature || '', previous_nomenclature: selectedBranch.previous_nomenclature || '', network: selectedBranch.network || '', phone_prefix: selectedBranch.phone_prefix || '', wlc: selectedBranch.wlc || '', is_active: selectedBranch.is_active !== false, active_since: String(selectedBranch.active_since || '2026-10-01').slice(0,10) }); setModal('editBranch'); }}>Modifica anagrafica</button></div><div className="tabs"><button className={branchTab === 'details' ? 'selected' : ''} onClick={() => setBranchTab('details')}>Anagrafica</button><button className={branchTab === 'devices' ? 'selected' : ''} onClick={() => setBranchTab('devices')}>Devices <span>{devices.filter((device) => String(device.branch_id) === String(selectedBranch.id)).length}</span></button><button className={branchTab === 'checklist' ? 'selected' : ''} onClick={() => setBranchTab('checklist')}>Check-list</button><button className={branchTab === 'companyHistory' ? 'selected' : ''} onClick={() => setBranchTab('companyHistory')}>Storico ragione sociale</button></div>{branchTab === 'details' && <div className="detail-grid">{[['Ragione sociale', selectedBranch.company_name], ['Paese', selectedBranch.country], ['Indirizzo', selectedBranch.street], ['Nomenclatura', selectedBranch.nomenclature], ['Vecchia nomenclatura', selectedBranch.previous_nomenclature], ['Network', selectedBranch.network], ['Phone Prefix', selectedBranch.phone_prefix], ['WLC', selectedBranch.wlc], ['Stato filiale', selectedBranch.is_active ? 'Attiva' : 'Non attiva'], ['Attiva dal', date(selectedBranch.active_since)]].map(([label, value]) => <article className="detail-field" key={label}><span>{label}</span><strong>{value || '—'}</strong></article>)}</div>}{branchTab === 'devices' && <BranchQuantityStock branch={selectedBranch} models={models} locations={locations} devices={devices.filter((device) => String(device.branch_id) === String(selectedBranch.id))} onChanged={loadData} onEditDevice={(device) => { setPage('devices'); openPrimaryDeviceEdit(device); }} onRemoveDevice={removeDeviceFromBranch} onEditQuantity={editBranchProductQuantity} onRemoveQuantity={removeBranchProductQuantity} onAddDevice={() => { setDeviceForm((form) => ({ ...form, branch_id: String(selectedBranch.id), stock_location_id: '', status: 'operational' })); setDeviceModalTab('details'); setModal('device'); }} />}{branchTab === 'companyHistory' && <div className="panel"><div className="panel-heading"><div><h3>Storico ragione sociale</h3><p>Cambi registrati automaticamente e ragioni sociali precedenti inserite manualmente per questa filiale.</p></div></div><form className="form-grid" onSubmit={addManualCompanyName}><label className="span-two">Ragione sociale precedente<select value={manualCompanyName} onChange={(event) => setManualCompanyName(event.target.value)} required><option value="">Seleziona una ragione sociale da Amministrazione…</option>{companies.slice().sort((a, b) => a.legal_name.localeCompare(b.legal_name, "it")).map((company) => <option key={company.id} value={company.legal_name}>{company.legal_name}</option>)}</select>{!companies.length && <small className="muted">Nessuna ragione sociale disponibile: aggiungila prima in Amministrazione → Ragioni sociali.</small>}</label><div className="span-two"><button className="primary-button" type="submit" disabled={busy || !manualCompanyName.trim()}>＋ Aggiungi allo storico</button></div></form>{companyHistory.length ? <div className="history-list">{companyHistory.map((item) => <article className="history-entry" key={item.type + '-' + item.id}><div className="history-marker" /><div className="history-entry-content">{item.type === 'manual' ? <><strong>{item.company_name}</strong><p>Ragione sociale precedente inserita manualmente · {new Intl.DateTimeFormat('it-IT', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(item.created_at))} · Inserita da {item.created_by || 'Utente non disponibile'}</p></> : <><strong>{item.from_company_name} <span>→</span> {item.to_company_name}</strong><p>{new Intl.DateTimeFormat('it-IT', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(item.changed_at))} · Modifica di {item.changed_by || 'Utente non disponibile'}</p></>}</div><button className="history-delete-button" type="button" title="Elimina voce dello storico" aria-label="Elimina voce dello storico" disabled={busy} onClick={() => deleteCompanyHistoryEntry(item)}>×</button></article>)}</div> : <EmptyState icon="↔" title="Nessuna voce nello storico" description="Aggiungi una ragione sociale precedente oppure modifica la ragione sociale della filiale per registrare automaticamente un cambio." />}</div>}{branchTab === 'checklist' && <div className="panel"><div className="panel-heading"><div><h3>Check-list operative</h3><p>Controlli e attività della filiale</p></div><button className="primary-button" onClick={() => setModal('checklist')}>＋ Nuova checklist</button></div>{checklists.map((checklist) => <div className="checklist-card" key={checklist.id}><div className="checklist-card-heading"><strong>{checklist.title}</strong><span className={'soft-tag ' + (checklist.status === 'completed' ? 'green-tag' : '')}>{checklist.status === 'completed' ? 'Completata' : 'Aperta'}</span></div>{checklist.items.map((item) => <label className="checklist-item" key={item.id}><input type="checkbox" checked={item.is_checked} onChange={async (event) => { try { await api('/checklist-items/' + item.id, { method: 'PATCH', body: JSON.stringify({ is_checked: event.target.checked }) }); const result = await api('/branches/' + selectedBranch.id + '/checklists'); setChecklists(result.data); } catch (err) { setError(err.message); } }} /><span>{item.label}</span></label>)}</div>)}{!checklists.length && <EmptyState icon="☷" title="Nessuna checklist" description="Crea una checklist per registrare le verifiche operative." />}</div>}</section>}
+          {page === 'branchDetail' && selectedBranch && <section className="page-content"><button className="back-link" onClick={() => setPage('branches')}>← Torna alle filiali</button><div className="detail-heading"><div className="branch-emblem">⌂</div><div><p className="eyebrow">SCHEDA FILIALE</p><h2>{selectedBranch.nomenclature || selectedBranch.street}</h2><p className="muted">{selectedBranch.company_name} · {selectedBranch.country} · {selectedBranch.street ? 'Via ' + selectedBranch.street : ''}</p></div><button className="secondary-button" onClick={() => { setBranchForm({ company_id: String(selectedBranch.company_id), country: selectedBranch.country || '', street: selectedBranch.street || '', nomenclature: selectedBranch.nomenclature || '', previous_nomenclature: selectedBranch.previous_nomenclature || '', network: selectedBranch.network || '', phone_prefix: selectedBranch.phone_prefix || '', wlc: selectedBranch.wlc || '', is_active: selectedBranch.is_active !== false, active_since: String(selectedBranch.active_since || '2026-10-01').slice(0,10) }); setModal('editBranch'); }}>Modifica anagrafica</button></div><div className="tabs"><button className={branchTab === 'details' ? 'selected' : ''} onClick={() => setBranchTab('details')}>Anagrafica</button><button className={branchTab === 'devices' ? 'selected' : ''} onClick={() => setBranchTab('devices')}>Devices <span>{devices.filter((device) => String(device.branch_id) === String(selectedBranch.id)).length}</span></button><button className={branchTab === 'checklist' ? 'selected' : ''} onClick={() => setBranchTab('checklist')}>Check-list</button><button className={branchTab === 'companyHistory' ? 'selected' : ''} onClick={() => setBranchTab('companyHistory')}>Storico ragione sociale</button></div>{branchTab === 'details' && <div className="detail-grid">{[['Ragione sociale', selectedBranch.company_name], ['Paese', selectedBranch.country], ['Indirizzo', selectedBranch.street], ['Nomenclatura', selectedBranch.nomenclature], ['Vecchia nomenclatura', selectedBranch.previous_nomenclature], ['Network', selectedBranch.network], ['Phone Prefix', selectedBranch.phone_prefix], ['WLC', selectedBranch.wlc], ['Stato filiale', selectedBranch.is_active ? 'Attiva' : 'Non attiva'], ['Attiva dal', date(selectedBranch.active_since)]].map(([label, value]) => <article className="detail-field" key={label}><span>{label}</span><strong>{value || '—'}</strong></article>)}</div>}{branchTab === 'devices' && <BranchQuantityStock branch={selectedBranch} models={models} locations={locations} devices={devices.filter((device) => String(device.branch_id) === String(selectedBranch.id))} onChanged={loadData} onEditDevice={(device) => { setPage('devices'); openPrimaryDeviceEdit(device); }} onRemoveDevice={removeDeviceFromBranch} onEditQuantity={editBranchProductQuantity} onRemoveQuantity={removeBranchProductQuantity} chooseWarehouse={chooseWarehouse} onAddDevice={() => { setDeviceForm((form) => ({ ...form, branch_id: String(selectedBranch.id), stock_location_id: '', status: 'operational' })); setDeviceModalTab('details'); setModal('device'); }} />}{branchTab === 'companyHistory' && <div className="panel"><div className="panel-heading"><div><h3>Storico ragione sociale</h3><p>Cambi registrati automaticamente e ragioni sociali precedenti inserite manualmente per questa filiale.</p></div></div><form className="form-grid" onSubmit={addManualCompanyName}><label className="span-two">Ragione sociale precedente<select value={manualCompanyName} onChange={(event) => setManualCompanyName(event.target.value)} required><option value="">Seleziona una ragione sociale da Amministrazione…</option>{companies.slice().sort((a, b) => a.legal_name.localeCompare(b.legal_name, "it")).map((company) => <option key={company.id} value={company.legal_name}>{company.legal_name}</option>)}</select>{!companies.length && <small className="muted">Nessuna ragione sociale disponibile: aggiungila prima in Amministrazione → Ragioni sociali.</small>}</label><div className="span-two"><button className="primary-button" type="submit" disabled={busy || !manualCompanyName.trim()}>＋ Aggiungi allo storico</button></div></form>{companyHistory.length ? <div className="history-list">{companyHistory.map((item) => <article className="history-entry" key={item.type + '-' + item.id}><div className="history-marker" /><div className="history-entry-content">{item.type === 'manual' ? <><strong>{item.company_name}</strong><p>Ragione sociale precedente inserita manualmente · {new Intl.DateTimeFormat('it-IT', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(item.created_at))} · Inserita da {item.created_by || 'Utente non disponibile'}</p></> : <><strong>{item.from_company_name} <span>→</span> {item.to_company_name}</strong><p>{new Intl.DateTimeFormat('it-IT', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(item.changed_at))} · Modifica di {item.changed_by || 'Utente non disponibile'}</p></>}</div><button className="history-delete-button" type="button" title="Elimina voce dello storico" aria-label="Elimina voce dello storico" disabled={busy} onClick={() => deleteCompanyHistoryEntry(item)}>×</button></article>)}</div> : <EmptyState icon="↔" title="Nessuna voce nello storico" description="Aggiungi una ragione sociale precedente oppure modifica la ragione sociale della filiale per registrare automaticamente un cambio." />}</div>}{branchTab === 'checklist' && <div className="panel"><div className="panel-heading"><div><h3>Check-list operative</h3><p>Controlli e attività della filiale</p></div><button className="primary-button" onClick={() => setModal('checklist')}>＋ Nuova checklist</button></div>{checklists.map((checklist) => <div className="checklist-card" key={checklist.id}><div className="checklist-card-heading"><strong>{checklist.title}</strong><span className={'soft-tag ' + (checklist.status === 'completed' ? 'green-tag' : '')}>{checklist.status === 'completed' ? 'Completata' : 'Aperta'}</span></div>{checklist.items.map((item) => <label className="checklist-item" key={item.id}><input type="checkbox" checked={item.is_checked} onChange={async (event) => { try { await api('/checklist-items/' + item.id, { method: 'PATCH', body: JSON.stringify({ is_checked: event.target.checked }) }); const result = await api('/branches/' + selectedBranch.id + '/checklists'); setChecklists(result.data); } catch (err) { setError(err.message); } }} /><span>{item.label}</span></label>)}</div>)}{!checklists.length && <EmptyState icon="☷" title="Nessuna checklist" description="Crea una checklist per registrare le verifiche operative." />}</div>}</section>}
 
           {page === 'devices' && <section className="page-content"><div className="page-intro"><div><p className="eyebrow">INVENTARIO</p><h2>Parco device</h2><p className="muted">Inventario centralizzato degli apparati e delle loro assegnazioni.</p></div><div className="page-actions"><button className="secondary-button" onClick={() => downloadCsv("device-" + new Date().toISOString().slice(0,10) + ".csv", [{label:"SKU",value:(row)=>row.sku},{label:"Marca",value:(row)=>row.manufacturer},{label:"Modello",value:(row)=>row.model_name},{label:"Seriale",value:(row)=>row.serial_number},{label:"Ragione sociale",value:(row)=>row.company_name},{label:"Filiale",value:(row)=>row.branch_nomenclature},{label:"Stato",value:(row)=>row.status},{label:"Contratto",value:(row)=>row.ownership_type === "rental" ? "NOL" : "DDE"},{label:"Costo acquisto",value:(row)=>row.purchase_cost},{label:"Canone mensile",value:(row)=>row.monthly_fee},{label:"Data attivazione",value:(row)=>row.activated_on || row.installed_on},{label:"Magazzino di provenienza",value:(row)=>row.stock_location}], filteredDevices)}>Esporta CSV</button><label className="secondary-button file-import-button">Importa CSV device<input type="file" accept=".csv,text/csv" hidden disabled={busy} onChange={(event) => { const file = event.target.files?.[0]; if (file) prepareDeviceImport(file); event.target.value = ""; }} /></label><button className="primary-button" onClick={() => { setDeviceForm({ model_id: "", purchase_profile_id: "", branch_id: "", stock_location_id: "", serial_number: "", status: "in_stock", ownership_type: "sale", purchase_cost: "", sale_price: "", monthly_fee: "", activated_on: new Date().toISOString().slice(0,10), notes: "" }); setDeviceModalTab('details'); setModal("device"); }}>＋ Registra device</button></div></div><div className="toolbar device-toolbar"><label className="search-box"><span>⌕</span><input placeholder="Cerca modello, seriale, filiale…" value={search} onChange={(event) => setSearch(event.target.value)} /></label><div className="device-filter-actions"><label className="device-status-filter"><span>Stato</span><select value={deviceStatusFilter} onChange={(event) => setDeviceStatusFilter(event.target.value)}><option value="all">Tutti</option><option value="fault">Guasto adesso</option><option value="fault_history">Guasti attuali o storici</option><option value="operational">Operativo</option><option value="to_activate">Da attivare</option><option value="in_stock">A magazzino</option><option value="decommissioned">Dismesso</option></select></label><button className="secondary-button" onClick={() => { setSearch(""); setDeviceStatusFilter("all"); }}>Azzera filtri</button><button className="secondary-button bulk-edit-compact" disabled={busy} onClick={openBulkEditModal}>✎ Modifica massiva</button><span className="result-count">{filteredDevices.length} dispositivi</span></div></div><div className="table-panel"><DeviceTable devices={filteredDevices} onEdit={(device) => { setDeviceForm({ model_id: String(device.model_id), purchase_profile_id: device.purchase_profile_id ? String(device.purchase_profile_id) : '', branch_id: device.branch_id ? String(device.branch_id) : '', stock_location_id: device.stock_location_id ? String(device.stock_location_id) : '', was_assigned: Boolean(device.branch_id), serial_number: device.serial_number || '', status: device.status, ownership_type: device.ownership_type, purchase_cost: device.purchase_cost ?? '', sale_price: device.sale_price ?? '', monthly_fee: device.monthly_fee ?? '', activated_on: String(device.activated_on || device.installed_on || '').slice(0,10), notes: device.notes || '' }); setDeviceModalTab('details'); setModal('editDevice:' + device.id); }} onManageFault={openFaultManagement} />{!filteredDevices.length && <EmptyState icon="▣" title="Nessun dispositivo trovato" description="Registra un dispositivo oppure modifica i filtri di ricerca." />}</div></section>}
 
@@ -1059,6 +1142,25 @@ export default function App() {
         </form>
       </Modal>}
       {modal === 'movement' && <Modal title="Registra movimento" subtitle="Il movimento aggiorna anche assegnazione e stato del device." onClose={() => setModal('')}><form className="form-stack" onSubmit={(event) => { event.preventDefault(); submitForm((body) => api('/stock/movements', { method: 'POST', body: JSON.stringify(body) }), { ...movementForm, device_id: Number(movementForm.device_id), from_location_id: movementForm.from_location_id ? Number(movementForm.from_location_id) : null, to_location_id: movementForm.to_location_id ? Number(movementForm.to_location_id) : null, branch_id: movementForm.branch_id ? Number(movementForm.branch_id) : null }); }}><label>Dispositivo<select value={movementForm.device_id} onChange={(event) => setMovementForm({ ...movementForm, device_id: event.target.value })} required><option value="">Seleziona device</option>{devices.map((device) => <option key={device.id} value={device.id}>{device.manufacturer} {device.model_name} · {device.asset_tag || 'senza tag'}</option>)}</select></label><label>Tipo movimento<input value={movementForm.movement_type} onChange={(event) => setMovementForm({ ...movementForm, movement_type: event.target.value })} required /></label><div className="form-grid"><label>Da ubicazione<select value={movementForm.from_location_id} onChange={(event) => setMovementForm({ ...movementForm, from_location_id: event.target.value })}><option value="">—</option>{locations.map((location) => <option key={location.id} value={location.id}>{location.name}</option>)}</select></label><label>A ubicazione<select value={movementForm.to_location_id} onChange={(event) => setMovementForm({ ...movementForm, to_location_id: event.target.value })}><option value="">—</option>{locations.map((location) => <option key={location.id} value={location.id}>{location.name}</option>)}</select></label><label>Filiale di destinazione<select value={movementForm.branch_id} onChange={(event) => setMovementForm({ ...movementForm, branch_id: event.target.value })}><option value="">Nessuna</option>{branches.map((branch) => <option key={branch.id} value={branch.id}>{[branch.company_name, branch.country, branch.street].filter(Boolean).join(' - ') || ('Filiale #' + branch.id)}</option>)}</select></label></div><label>Note<textarea rows="2" value={movementForm.notes} onChange={(event) => setMovementForm({ ...movementForm, notes: event.target.value })} /></label><div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setModal('')}>Annulla</button><button className="primary-button" disabled={busy}>Registra movimento</button></div></form></Modal>}
+      {warehousePicker && <Modal title="Seleziona magazzino" subtitle={warehousePicker.title} onClose={() => { warehousePicker.resolve(null); setWarehousePicker(null); }}>
+        <form className="form-stack" onSubmit={(event) => {
+          event.preventDefault();
+          const selected = warehousePicker.options.find((option) => String(option.locationId) === warehousePicker.selectedId) || null;
+          warehousePicker.resolve(selected);
+          setWarehousePicker(null);
+        }}>
+          <label>Magazzino
+            <select value={warehousePicker.selectedId} onChange={(event) => setWarehousePicker((current) => ({ ...current, selectedId: event.target.value }))} required>
+              <option value="">Seleziona magazzino…</option>
+              {warehousePicker.options.map((option) => <option key={option.locationId} value={String(option.locationId)}>{option.name}{option.available !== undefined ? ' — disponibili: ' + option.available : ''}</option>)}
+            </select>
+          </label>
+          <div className="modal-actions">
+            <button type="button" className="secondary-button" onClick={() => { warehousePicker.resolve(null); setWarehousePicker(null); }}>Annulla</button>
+            <button type="submit" className="primary-button" disabled={!warehousePicker.selectedId}>Conferma magazzino</button>
+          </div>
+        </form>
+      </Modal>}
     </div>
   );
 }
