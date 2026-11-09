@@ -1467,14 +1467,35 @@ app.get('/product-stock',async(_req,res,next)=>{
  }catch(error){next(error);}
 });
 
+app.patch('/branches/:id/product-stock/:modelId/location', requireRole('admin', 'warehouse', 'technician'), async (req, res, next) => {
+  const branchId = parseId(req.params.id);
+  const modelId = parseId(req.params.modelId);
+  const locationId = parseId(req.body?.stock_location_id);
+  if (!branchId || !modelId || !locationId) {
+    return fail(res, 400, 'Filiale, prodotto e magazzino di ubicazione sono obbligatori.');
+  }
+  try {
+    const result = await pool.query(
+      'UPDATE branch_product_stock SET stock_location_id=$1, updated_at=NOW() WHERE branch_id=$2 AND device_model_id=$3 AND quantity > 0 RETURNING *',
+      [locationId, branchId, modelId]
+    );
+    if (!result.rowCount) return fail(res, 404, 'Prodotto a quantità non trovato nella filiale.');
+    res.json({ data: result.rows[0] });
+  } catch (error) {
+    if (error.code === '23503') return fail(res, 400, 'Magazzino non valido.');
+    next(error);
+  }
+});
+
 app.get('/branches/:id/product-stock', async (req, res, next) => {
   const branchId = parseId(req.params.id);
   if (!branchId) return fail(res, 400, 'ID filiale non valido.');
   try {
     const result = await pool.query(`
-      SELECT bps.*, dm.manufacturer, dm.model_name, dm.sku, dm.category
+      SELECT bps.*, dm.manufacturer, dm.model_name, dm.sku, dm.category, sl.name AS stock_location_name
       FROM branch_product_stock bps
       JOIN device_models dm ON dm.id = bps.device_model_id
+      LEFT JOIN stock_locations sl ON sl.id = bps.stock_location_id
       WHERE bps.branch_id = $1 AND bps.quantity > 0
       ORDER BY dm.category, dm.manufacturer, dm.model_name
     `, [branchId]);
