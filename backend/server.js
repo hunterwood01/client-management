@@ -1529,12 +1529,12 @@ app.post('/branches/:id/product-stock', requireRole('admin', 'warehouse', 'techn
       [quantity, modelId, locationId]
     );
     const assigned = await client.query(`
-      INSERT INTO branch_product_stock(branch_id, device_model_id, quantity)
-      VALUES ($1,$2,$3)
+      INSERT INTO branch_product_stock(branch_id, device_model_id, quantity, stock_location_id)
+      VALUES ($1,$2,$3,$4)
       ON CONFLICT (branch_id, device_model_id)
-      DO UPDATE SET quantity=branch_product_stock.quantity+EXCLUDED.quantity, updated_at=NOW()
+      DO UPDATE SET quantity=branch_product_stock.quantity+EXCLUDED.quantity, stock_location_id=EXCLUDED.stock_location_id, updated_at=NOW()
       RETURNING *
-    `, [branchId, modelId, quantity]);
+    `, [branchId, modelId, quantity, locationId]);
     await client.query(
       "INSERT INTO product_stock_movements(device_model_id,stock_location_id,quantity_delta,movement_type,notes,moved_by) VALUES($1,$2,$3,'adjustment',$4,$5)",
       [modelId, locationId, -quantity, 'Assegnazione quantità alla filiale ' + branchId, req.user.id]
@@ -1590,13 +1590,13 @@ app.patch('/branches/:id/product-stock/:modelId', requireRole('admin', 'warehous
     let updated;
     if (current.rowCount) {
       updated = await client.query(
-        'UPDATE branch_product_stock SET quantity=$1,updated_at=NOW() WHERE branch_id=$2 AND device_model_id=$3 RETURNING *',
-        [currentQuantity + delta, branchId, modelId]
+        'UPDATE branch_product_stock SET quantity=$1,stock_location_id=$2,updated_at=NOW() WHERE branch_id=$3 AND device_model_id=$4 RETURNING *',
+        [currentQuantity + delta, locationId, branchId, modelId]
       );
     } else {
       updated = await client.query(
-        'INSERT INTO branch_product_stock(branch_id,device_model_id,quantity) VALUES($1,$2,$3) RETURNING *',
-        [branchId, modelId, delta]
+        'INSERT INTO branch_product_stock(branch_id,device_model_id,quantity,stock_location_id) VALUES($1,$2,$3,$4) RETURNING *',
+        [branchId, modelId, delta, locationId]
       );
     }
     await client.query(
