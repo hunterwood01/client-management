@@ -344,10 +344,32 @@ function BranchQuantityStock({ branch, models, locations, devices, onChanged, on
     event.preventDefault();
     setBusy(true); setError('');
     try {
-      await api('/branches/' + branch.id + '/product-stock', {
-        method: 'POST',
-        body: JSON.stringify({ device_model_id: Number(modelId), stock_location_id: Number(locationId), quantity: Number(quantity) })
-      });
+      const selectedLocation = locations.find((location) => String(location.id) === String(locationId));
+      try {
+        await api('/branches/' + branch.id + '/product-stock', {
+          method: 'POST',
+          body: JSON.stringify({ device_model_id: Number(modelId), stock_location_id: Number(locationId), quantity: Number(quantity) })
+        });
+      } catch (err) {
+        if (!/insufficient|insufficiente/i.test(err.message || '')) throw err;
+        const stockResult = await api('/product-stock');
+        const availability = (stockResult.data || [])
+          .filter((item) => Number(item.device_model_id) === Number(modelId))
+          .map((item) => ({ locationId: Number(item.stock_location_id), name: item.stock_location_name, available: Number(item.available_quantity ?? item.quantity ?? 0) }))
+          .sort((a, b) => a.name.localeCompare(b.name, 'it'));
+        const choices = availability.map((item, index) => (index + 1) + '. ' + item.name + ' — disponibili: ' + item.available).join('\\n');
+        if (!availability.length) throw new Error('Nessuna disponibilità di questo prodotto nei magazzini.');
+        const promptText = 'Nel magazzino selezionato (' + (selectedLocation?.name || '—') + ') non ci sono ' + quantity + ' unità disponibili.\\nDisponibilità negli altri magazzini:\\n' + choices + '\\n\\nInserisci il numero del magazzino da cui prelevare:';
+        const choice = window.prompt(promptText, String(Math.max(1, availability.findIndex((item) => item.locationId !== Number(locationId)) + 1)));
+        if (choice === null) return;
+        const alternate = availability[Number(choice) - 1];
+        if (!alternate) throw new Error('Selezione magazzino non valida.');
+        if (alternate.available < Number(quantity)) throw new Error('Disponibilità insufficiente nel magazzino scelto (' + alternate.available + ' unità).');
+        await api('/branches/' + branch.id + '/product-stock', {
+          method: 'POST',
+          body: JSON.stringify({ device_model_id: Number(modelId), stock_location_id: alternate.locationId, quantity: Number(quantity) })
+        });
+      }
       setModelId('');
       setQuantity('1');
       await load();
