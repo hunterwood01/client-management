@@ -662,11 +662,12 @@ export default function App() {
 
   async function removeBranchProductQuantity(row) {
     if (!window.confirm('Rimuovere tutte le ' + row.quantity + ' unità di ' + row.manufacturer + ' ' + row.model_name + ' dalla filiale?')) return;
-    const locationOptions = locations.map((location, index) => (index + 1) + '. ' + location.name).join('\\n');
-    const choice = window.prompt('Seleziona il magazzino in cui rientrano le unità (numero):\\n' + locationOptions, '1');
-    if (choice === null) return;
-    const selectedLocation = locations[Number(choice) - 1];
-    if (!selectedLocation) { setError('Magazzino non valido.'); return; }
+    const selectedLocation = await chooseWarehouse(
+      locations.map((location) => ({ locationId: Number(location.id), name: location.name })),
+      'Scegli il magazzino in cui far rientrare le unità:',
+      row.stock_location_id || locations[0]?.id
+    );
+    if (!selectedLocation) return;
     setBusy(true); setError(''); setSuccess('');
     try {
       await api('/branches/' + selectedBranch.id + '/product-stock/' + row.device_model_id, {
