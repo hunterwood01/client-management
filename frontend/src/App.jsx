@@ -1141,6 +1141,25 @@ export default function App() {
         </form>
       </Modal>}
       {modal === 'movement' && <Modal title="Registra movimento" subtitle="Il movimento aggiorna anche assegnazione e stato del device." onClose={() => setModal('')}><form className="form-stack" onSubmit={(event) => { event.preventDefault(); submitForm((body) => api('/stock/movements', { method: 'POST', body: JSON.stringify(body) }), { ...movementForm, device_id: Number(movementForm.device_id), from_location_id: movementForm.from_location_id ? Number(movementForm.from_location_id) : null, to_location_id: movementForm.to_location_id ? Number(movementForm.to_location_id) : null, branch_id: movementForm.branch_id ? Number(movementForm.branch_id) : null }); }}><label>Dispositivo<select value={movementForm.device_id} onChange={(event) => setMovementForm({ ...movementForm, device_id: event.target.value })} required><option value="">Seleziona device</option>{devices.map((device) => <option key={device.id} value={device.id}>{device.manufacturer} {device.model_name} · {device.asset_tag || 'senza tag'}</option>)}</select></label><label>Tipo movimento<input value={movementForm.movement_type} onChange={(event) => setMovementForm({ ...movementForm, movement_type: event.target.value })} required /></label><div className="form-grid"><label>Da ubicazione<select value={movementForm.from_location_id} onChange={(event) => setMovementForm({ ...movementForm, from_location_id: event.target.value })}><option value="">—</option>{locations.map((location) => <option key={location.id} value={location.id}>{location.name}</option>)}</select></label><label>A ubicazione<select value={movementForm.to_location_id} onChange={(event) => setMovementForm({ ...movementForm, to_location_id: event.target.value })}><option value="">—</option>{locations.map((location) => <option key={location.id} value={location.id}>{location.name}</option>)}</select></label><label>Filiale di destinazione<select value={movementForm.branch_id} onChange={(event) => setMovementForm({ ...movementForm, branch_id: event.target.value })}><option value="">Nessuna</option>{branches.map((branch) => <option key={branch.id} value={branch.id}>{[branch.company_name, branch.country, branch.street].filter(Boolean).join(' - ') || ('Filiale #' + branch.id)}</option>)}</select></label></div><label>Note<textarea rows="2" value={movementForm.notes} onChange={(event) => setMovementForm({ ...movementForm, notes: event.target.value })} /></label><div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setModal('')}>Annulla</button><button className="primary-button" disabled={busy}>Registra movimento</button></div></form></Modal>}
+      {warehousePicker && <Modal title="Seleziona magazzino" subtitle={warehousePicker.title} onClose={() => { warehousePicker.resolve(null); setWarehousePicker(null); }}>
+        <form className="form-stack" onSubmit={(event) => {
+          event.preventDefault();
+          const selected = warehousePicker.options.find((option) => String(option.locationId) === warehousePicker.selectedId) || null;
+          warehousePicker.resolve(selected);
+          setWarehousePicker(null);
+        }}>
+          <label>Magazzino
+            <select value={warehousePicker.selectedId} onChange={(event) => setWarehousePicker((current) => ({ ...current, selectedId: event.target.value }))} required>
+              <option value="">Seleziona magazzino…</option>
+              {warehousePicker.options.map((option) => <option key={option.locationId} value={String(option.locationId)}>{option.name}{option.available !== undefined ? ' — disponibili: ' + option.available : ''}</option>)}
+            </select>
+          </label>
+          <div className="modal-actions">
+            <button type="button" className="secondary-button" onClick={() => { warehousePicker.resolve(null); setWarehousePicker(null); }}>Annulla</button>
+            <button type="submit" className="primary-button" disabled={!warehousePicker.selectedId}>Conferma magazzino</button>
+          </div>
+        </form>
+      </Modal>}
     </div>
   );
 }
