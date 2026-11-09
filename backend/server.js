@@ -615,6 +615,7 @@ app.post('/device-models', requireRole('admin'), async (req, res, next) => {
  const manufacturer=cleanString(req.body?.manufacturer,120), modelName=cleanString(req.body?.model_name,160), category=cleanString(req.body?.category,100), sku=cleanString(req.body?.sku,100);
  const ownership=req.body?.ownership_type||'sale', cost=req.body?.default_purchase_cost===''?null:(req.body?.default_purchase_cost??null), fee=req.body?.default_monthly_fee===''?null:(req.body?.default_monthly_fee??null), notes=cleanString(req.body?.notes,10000);
  if(!manufacturer||!modelName||!category||[manufacturer,modelName,category,sku,notes].includes(undefined))return fail(res,400,'Produttore, modello e categoria sono obbligatori.');
+ if(!['Collaboration','Wireless','Network','Security'].includes(category))return fail(res,400,'Categoria prodotto non valida.');
  if(!['sale','rental'].includes(ownership))return fail(res,400,'Tipologia economica non valida.');
  if((cost!==null&&(!Number.isFinite(Number(cost))||Number(cost)<0))||(fee!==null&&(!Number.isFinite(Number(fee))||Number(fee)<0)))return fail(res,400,'Importi non validi.');
  try{const result=await pool.query('INSERT INTO device_models(manufacturer,model_name,category,sku,ownership_type,default_purchase_cost,default_monthly_fee,notes) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *',[manufacturer,modelName,category,sku||null,ownership,cost,fee,notes]);res.status(201).json({data:result.rows[0]});}
@@ -626,6 +627,7 @@ app.put('/device-models/:id', requireRole('admin'), async (req,res,next)=>{
  const ownership=req.body?.ownership_type||'sale', cost=req.body?.default_purchase_cost===''?null:(req.body?.default_purchase_cost??null), fee=req.body?.default_monthly_fee===''?null:(req.body?.default_monthly_fee??null), notes=cleanString(req.body?.notes,10000);
  if(!id)return fail(res,400,'ID modello non valido.');
  if(!manufacturer||!modelName||!category||[manufacturer,modelName,category,sku,notes].includes(undefined))return fail(res,400,'Produttore, modello e categoria sono obbligatori.');
+ if(!['Collaboration','Wireless','Network','Security'].includes(category))return fail(res,400,'Categoria prodotto non valida.');
  if(!['sale','rental'].includes(ownership)||(cost!==null&&(!Number.isFinite(Number(cost))||Number(cost)<0))||(fee!==null&&(!Number.isFinite(Number(fee))||Number(fee)<0)))return fail(res,400,'Valori del modello non validi.');
  try{const result=await pool.query('UPDATE device_models SET manufacturer=$1,model_name=$2,category=$3,sku=$4,ownership_type=$5,default_purchase_cost=$6,default_monthly_fee=$7,notes=$8,updated_at=NOW() WHERE id=$9 RETURNING *',[manufacturer,modelName,category,sku||null,ownership,cost,fee,notes,id]);if(!result.rowCount)return fail(res,404,'Modello non trovato.');res.json({data:result.rows[0]});}
  catch(error){if(error.code==='23505')return fail(res,409,'Modello o SKU già presente.');next(error);}
