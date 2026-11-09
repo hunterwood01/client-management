@@ -632,7 +632,7 @@ export default function App() {
     try {
       try {
         await api('/branches/' + selectedBranch.id + '/product-stock/' + row.device_model_id, {
-          method: 'PATCH', body: JSON.stringify({ quantity_delta: delta, stock_location_id: Number(selectedLocation.id) })
+          method: 'PATCH', body: JSON.stringify({ quantity_delta: delta, stock_location_id: Number(selectedLocation.locationId) })
         });
       } catch (err) {
         if (delta <= 0 || !/insufficient|insufficiente/i.test(err.message || '')) throw err;
@@ -645,7 +645,7 @@ export default function App() {
         const alternate = await chooseWarehouse(
           availability,
           'Il magazzino selezionato (' + selectedLocation.name + ') non ha ' + delta + ' unità disponibili. Scegli un magazzino alternativo:',
-          availability.find((item) => item.locationId !== Number(selectedLocation.id))?.locationId
+          availability.find((item) => item.locationId !== Number(selectedLocation.locationId))?.locationId
         );
         if (!alternate) return;
         if (!alternate) throw new Error('Selezione magazzino non valida.');
@@ -671,7 +671,7 @@ export default function App() {
     setBusy(true); setError(''); setSuccess('');
     try {
       await api('/branches/' + selectedBranch.id + '/product-stock/' + row.device_model_id, {
-        method: 'PATCH', body: JSON.stringify({ quantity_delta: -Number(row.quantity), stock_location_id: Number(selectedLocation.id) })
+        method: 'PATCH', body: JSON.stringify({ quantity_delta: -Number(row.quantity), stock_location_id: Number(selectedLocation.locationId) })
       });
       await loadData();
       setSuccess('Prodotto rimosso dalla filiale e quantità rientrata a magazzino.');
