@@ -327,6 +327,7 @@ function BranchQuantityStock({ branch, models, locations, devices, onChanged, on
   const [quantity, setQuantity] = useState('1');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  const [detailRow, setDetailRow] = useState(null);
 
   const load = useCallback(async () => {
     try {
@@ -399,8 +400,21 @@ function BranchQuantityStock({ branch, models, locations, devices, onChanged, on
       <label>Quantità<input type="number" min="1" step="1" value={quantity} onChange={(event) => setQuantity(event.target.value)} required /></label>
       <div className="span-two"><button className="primary-button" disabled={busy || !modelId || !locationId || Number(quantity) < 1}>{busy ? 'Assegnazione…' : '＋ Assegna quantità'}</button></div>
     </form>
+    {detailRow && <Modal title="Dettagli prodotto" subtitle="Prodotto gestito a quantità nella filiale" onClose={() => setDetailRow(null)}>
+      <div className="form-stack">
+        <div className="form-grid">
+          <label>Produttore<input readOnly value={detailRow.manufacturer || '—'} /></label>
+          <label>Modello<input readOnly value={detailRow.model_name || '—'} /></label>
+          <label>SKU<input readOnly value={detailRow.sku || '—'} /></label>
+          <label>Categoria<input readOnly value={detailRow.category || '—'} /></label>
+          <label>Quantità assegnata<input readOnly value={String(detailRow.quantity ?? 0)} /></label>
+          <label>Filiale<input readOnly value={branch.nomenclature || branch.company_name || ('Filiale #' + branch.id)} /></label>
+        </div>
+        <div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setDetailRow(null)}>Chiudi</button><button type="button" className="primary-button" onClick={() => { const row = detailRow; setDetailRow(null); onEditQuantity?.(row); }}>Modifica quantità</button></div>
+      </div>
+    </Modal>}
     {error && <p role="alert" className="form-error">{error}</p>}
-    {unifiedRows.length ? <div className="table-panel nested-table"><table><thead><tr><th>SKU</th><th>Prodotto</th><th>Seriale / tag</th><th>Tipologia</th><th>Quantità</th><th>Stato</th><th>Azioni</th></tr></thead><tbody>{unifiedRows.map((row) => <tr key={row.id}><td>{row.sku || '—'}</td><td>{row.product.trim()}</td><td>{row.serial}</td><td>{row.kind}</td><td>{row.quantity}</td><td>{row.status}</td><td>{row.device ? <div className="row-actions"><button type="button" className="row-action" onClick={() => onEditDevice?.(row.device)}>Modifica</button><button type="button" className="row-action danger" disabled={busy} onClick={() => onRemoveDevice?.(row.device)}>Rimuovi</button></div> : row.stockRow ? <div className="row-actions"><button type="button" className="row-action" disabled={busy} onClick={() => onEditQuantity?.(row.stockRow)}>Modifica quantità</button><button type="button" className="row-action danger" disabled={busy} onClick={() => onRemoveQuantity?.(row.stockRow)}>Rimuovi</button></div> : '—'}</td></tr>)}</tbody></table></div> : <p className="muted">Nessun dispositivo associato a questa filiale.</p>}
+    {unifiedRows.length ? <div className="table-panel nested-table"><table><thead><tr><th>SKU</th><th>Prodotto</th><th>Seriale / tag</th><th>Tipologia</th><th>Quantità</th><th>Stato</th><th>Azioni</th></tr></thead><tbody>{unifiedRows.map((row) => <tr key={row.id}><td>{row.sku || '—'}</td><td>{row.product.trim()}</td><td>{row.serial}</td><td>{row.kind}</td><td>{row.quantity}</td><td>{row.status}</td><td>{row.device ? <div className="row-actions"><button type="button" className="row-action" onClick={() => onEditDevice?.(row.device)}>Modifica</button><button type="button" className="row-action danger" disabled={busy} onClick={() => onRemoveDevice?.(row.device)}>Rimuovi</button></div> : row.stockRow ? <div className="row-actions"><button type="button" className="row-action" onClick={() => setDetailRow(row.stockRow)}>Dettagli</button><button type="button" className="row-action" disabled={busy} onClick={() => onEditQuantity?.(row.stockRow)}>Modifica quantità</button><button type="button" className="row-action danger" disabled={busy} onClick={() => onRemoveQuantity?.(row.stockRow)}>Rimuovi</button></div> : '—'}</td></tr>)}</tbody></table></div> : <p className="muted">Nessun dispositivo associato a questa filiale.</p>}
   </section>;
 }
 
