@@ -368,12 +368,13 @@ function BranchQuantityStock({ branch, models, locations, devices, onChanged }) 
       if (!totals.has(key)) totals.set(key, { name: (device.manufacturer || '') + ' ' + (device.model_name || ''), sku: device.sku || '', quantity: 0 });
     });
     individual.forEach((qty, key) => { const current = totals.get(key); current.quantity += qty; });
-    const reference = branch.nomenclature || branch.previous_nomenclature || branch.company_name || ('Filiale #' + branch.id);
+    const nomenclature = branch.nomenclature || branch.previous_nomenclature || ('Filiale #' + branch.id);
+    const extendedName = [branch.company_name, branch.street].filter(Boolean).join(' ').trim();
     const escapeHtml = (value) => String(value ?? '').replace(/[&<>"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[char]));
     const lines = [...totals.values()].filter((item) => item.quantity > 0).sort((a, b) => a.name.localeCompare(b.name, 'it'));
     const popup = window.open('', '_blank');
     if (!popup) { setError('Abilita i popup per esportare il PDF.'); return; }
-    popup.document.write('<!doctype html><html><head><meta charset="utf-8"><title>Device filiale</title><style>body{font-family:Arial,sans-serif;margin:24px;color:#111}h1{font-size:20px}table{width:100%;border-collapse:collapse;margin-top:20px}th,td{padding:8px;border:1px solid #ccc;text-align:left}th{background:#eee}.qty{text-align:right}@media print{body{margin:12mm}}</style></head><body><h1>Filiale: ' + escapeHtml(reference) + '</h1><table><thead><tr><th>Dispositivo</th><th>SKU</th><th class="qty">Quantità</th></tr></thead><tbody>' + lines.map((item) => '<tr><td>' + escapeHtml(item.name.trim()) + '</td><td>' + escapeHtml(item.sku || '—') + '</td><td class="qty">' + item.quantity + '</td></tr>').join('') + '</tbody></table></body></html>');
+    popup.document.write('<!doctype html><html><head><meta charset="utf-8"><title>Device filiale</title><style>body{font-family:Arial,sans-serif;margin:24px;color:#111}h1{font-size:20px;margin-bottom:6px}.branch-name{font-size:15px;margin-top:0;color:#444}table{width:100%;border-collapse:collapse;margin-top:20px}th,td{padding:8px;border:1px solid #ccc;text-align:left}th{background:#eee}.qty{text-align:right}@media print{body{margin:12mm}}</style></head><body><h1>Nomenclatura: ' + escapeHtml(nomenclature) + '</h1>' + (extendedName ? '<p class="branch-name">Nome esteso: ' + escapeHtml(extendedName) + '</p>' : '') + '<table><thead><tr><th>Dispositivo</th><th>SKU</th><th class="qty">Quantità</th></tr></thead><tbody>' + lines.map((item) => '<tr><td>' + escapeHtml(item.name.trim()) + '</td><td>' + escapeHtml(item.sku || '—') + '</td><td class="qty">' + item.quantity + '</td></tr>').join('') + '</tbody></table></body></html>');
     popup.document.close();
     popup.focus();
     popup.print();
