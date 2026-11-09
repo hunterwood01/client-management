@@ -612,9 +612,28 @@ export default function App() {
     if (delta === 0) return;
     setBusy(true); setError(''); setSuccess('');
     try {
-      await api('/branches/' + selectedBranch.id + '/product-stock/' + row.device_model_id, {
-        method: 'PATCH', body: JSON.stringify({ quantity_delta: delta, stock_location_id: Number(selectedLocation.id) })
-      });
+      try {
+        await api('/branches/' + selectedBranch.id + '/product-stock/' + row.device_model_id, {
+          method: 'PATCH', body: JSON.stringify({ quantity_delta: delta, stock_location_id: Number(selectedLocation.id) })
+        });
+      } catch (err) {
+        if (delta <= 0 || !/insufficient|insufficiente/i.test(err.message || '')) throw err;
+        const stockResult = await api('/product-stock');
+        const availability = (stockResult.data || [])
+          .filter((item) => Number(item.device_model_id) === Number(row.device_model_id))
+          .map((item) => ({ locationId: Number(item.stock_location_id), name: item.stock_location_name, available: Number(item.available_quantity ?? item.quantity ?? 0) }))
+          .sort((a, b) => a.name.localeCompare(b.name, 'it'));
+        const choices = availability.map((item, index) => (index + 1) + '. ' + item.name + ' — disponibili: ' + item.available).join('\\n');
+        if (!availability.length) throw new Error('Nessuna disponibilità di questo prodotto nei magazzini.');
+        const choice = window.prompt('Nel magazzino selezionato (' + selectedLocation.name + ') non ci sono ' + delta + ' unità disponibili.\\nDisponibilità negli altri magazzini:\\n' + choices + '\\n\\nInserisci il numero del magazzino da cui prelevare:', String(Math.max(1, availability.findIndex((item) => item.locationId !== Number(selectedLocation.id)) + 1)));
+        if (choice === null) return;
+        const alternate = availability[Number(choice) - 1];
+        if (!alternate) throw new Error('Selezione magazzino non valida.');
+        if (alternate.available < delta) throw new Error('Disponibilità insufficiente nel magazzino scelto (' + alternate.available + ' unità).');
+        await api('/branches/' + selectedBranch.id + '/product-stock/' + row.device_model_id, {
+          method: 'PATCH', body: JSON.stringify({ quantity_delta: delta, stock_location_id: alternate.locationId })
+        });
+      }
       await loadData();
       setSuccess('Quantità aggiornata.');
     } catch (err) { setError(err.message); }
